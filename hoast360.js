@@ -27,7 +27,7 @@ import videojs from 'video.js';
 import 'videojs-contrib-dash'
 import 'videojs-http-source-selector';
 import 'videojs-contrib-quality-levels';
-import 'videojs-xr';
+import './dependencies/videojs-xr/plugin.js';
 import MatrixMultiplier from './dependencies/MatrixMultiplier.js';
 import { zoomMtx, stepsize, minZoomfactor, maxZoomfactor } from './dependencies/HoastZoom.js';
 import PlaybackEventHandler from './dependencies/PlaybackEventHandler.js';
@@ -76,7 +76,11 @@ export class HOAST360 {
 
         // create as many audio players as we need for max order
         this.audioElement = new Audio();
-        if (this.audioElement.canPlayType('audio/ogg; codecs="opus"') === '') {
+        // playback runs through MSE (dash.js), so probe MSE opus support in the
+        // containers we actually stream (fMP4 from shaka-packager, webm demo media)
+        if (typeof MediaSource === 'undefined' ||
+            !(MediaSource.isTypeSupported('audio/mp4; codecs="opus"') ||
+              MediaSource.isTypeSupported('audio/webm; codecs="opus"'))) {
             this.opusSupport = false;
         }
 
@@ -86,6 +90,19 @@ export class HOAST360 {
             plugins: {
                 httpSourceSelector: { default: 'auto' }
             }
+        });
+
+        let scope = this;
+        this.videoPlayer.on('play', function () {
+            // autoplay policy: the context starts suspended; the play click is the
+            // user gesture that may resume it. PlaybackEventHandler covers the
+            // separate-audio path, but the combined-MPD path has no other resume.
+            if (scope.context.state !== 'running')
+                scope.context.resume();
+
+            // same gesture unlocks the iOS 13+ DeviceOrientation permission
+            if (scope.videoPlayer.usingPlugin('xr'))
+                scope.videoPlayer.xr().enableOrientation();
         });
     }
 

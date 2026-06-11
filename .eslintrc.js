@@ -4,12 +4,13 @@ module.exports = {
         "es6": true
     },
     "extends": "eslint:recommended",
+    "ignorePatterns": ["dist/", "dependencies/videojs-xr/"],
     "globals": {
         "Atomics": "readonly",
         "SharedArrayBuffer": "readonly"
     },
     "parserOptions": {
-        "ecmaVersion": 2018,
+        "ecmaVersion": 2022,
         "sourceType": "module"
     },
     "rules": {

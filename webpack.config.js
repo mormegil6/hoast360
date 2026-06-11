@@ -1,20 +1,16 @@
-var webpack = require('webpack');
-var BundleAnalyzerPlugin = require('webpack-bundle-analyzer').BundleAnalyzerPlugin;
+const ESLintPlugin = require('eslint-webpack-plugin');
+const BundleAnalyzerPlugin = require('webpack-bundle-analyzer').BundleAnalyzerPlugin;
 
 const config = {
     entry: './hoast360.js',
     output: {
         filename: 'hoast360.bundle.js',
-        libraryTarget: 'umd'
+        library: {
+            type: 'umd'
+        }
     },
     module: {
         rules: [
-            {
-                enforce: 'pre',
-                test: /\.js$/,
-                exclude: /node_modules/,
-                loader: 'eslint-loader',
-            },
             {
                 test: /\.m?js$/,
                 exclude: /(node_modules|bower_components)/,
@@ -32,15 +28,18 @@ const config = {
         ]
     },
     resolve: {
-        extensions: ['*', '.js'],
+        extensions: ['.js'],
     },
     plugins: [
+        new ESLintPlugin({
+            // vendored third-party code (videojs-xr fork) is not linted
+            exclude: ['node_modules', 'dependencies/videojs-xr']
+        })
     ]
 };
 
 module.exports = env => {
-    const doAnalysis = env.analyze;
-    if (doAnalysis)
+    if (env && env.analyze)
         config.plugins.push(new BundleAnalyzerPlugin({ analyzerPort: 8123 }));
 
     return config;
