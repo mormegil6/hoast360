@@ -19,8 +19,8 @@
 
     <button onclick="init()">load</button>
     <button onclick="stop()">stop</button>
-    
-    <video-js id='hoast360-player' class='video-js vjs-fluid vjs-big-play-centered ' controls preload='auto' crossorigin="anonymous" data-setup='{}'>
+
+    <video-js id='hoast360-player' class='video-js vjs-fluid vjs-big-play-centered' controls preload='auto' crossorigin="anonymous" data-setup='{}' poster="media/hoast_demo_o4/thumbnail.jpg">
         <p class='vjs-no-js'>
           To view this video please enable JavaScript, and consider upgrading to a web browser that
           <a href='https://videojs.com/html5-video-support/' target='_blank'>supports HTML5 video</a>
@@ -32,7 +32,7 @@
         var hoast360 = new HOAST360();
 
         function init() {
-            hoast360.initialize("media/hoast_demo_o4/", "irs/", 4);
+            hoast360.initialize("/dash/hoast_demo.mpd", "/irs/", 3);
         }
 
         function stop() {
