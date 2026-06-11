@@ -9,6 +9,7 @@
 
 import {
 	EventDispatcher,
+	MathUtils,
 	MOUSE,
 	Quaternion,
 	Spherical,
@@ -556,7 +557,8 @@ var OrbitControls = function ( object, domElement ) {
 	function handleMouseWheel( event ) {
         scope.currentDistance += Math.sign(event.deltaY) * 15;
         // make sure scope.currentDistance never gets 0!
-        scope.currentDistance = Math.clamp( scope.currentDistance != 0 ? scope.currentDistance : Math.sign(event.deltaY) + 0.1, scope.minDistance, scope.maxDistance );    
+        // HOAST360 fix: Math.clamp does not exist; use THREE.MathUtils.clamp
+        scope.currentDistance = MathUtils.clamp( scope.currentDistance != 0 ? scope.currentDistance : Math.sign(event.deltaY) + 0.1, scope.minDistance, scope.maxDistance );
         
 		if ( event.deltaY < 0 ) {
 

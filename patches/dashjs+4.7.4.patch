@@ -1,0 +1,75 @@
+diff --git a/node_modules/dashjs/dist/dash.all.debug.js b/node_modules/dashjs/dist/dash.all.debug.js
+index 4ecc55a..cc753c5 100644
+--- a/node_modules/dashjs/dist/dash.all.debug.js
++++ b/node_modules/dashjs/dist/dash.all.debug.js
+@@ -14173,7 +14173,18 @@ function TimelineSegmentsGetter(config, isDynamic) {
+     }
+ 
+     var base = representation.adaptation.period.mpd.manifest.Period_asArray[representation.adaptation.period.index].AdaptationSet_asArray[representation.adaptation.index].Representation_asArray[representation.index].SegmentTemplate || representation.adaptation.period.mpd.manifest.Period_asArray[representation.adaptation.period.index].AdaptationSet_asArray[representation.adaptation.index].Representation_asArray[representation.index].SegmentList;
+-    var timeline = base.SegmentTimeline;
++    var timeline = base ? base.SegmentTimeline : null;
++
++    // HOAST360 patch: on dynamic streams a manifest refresh can race a
++    // non-atomic MPD write (e.g. ffmpeg dash muxer), leaving the timeline
++    // momentarily unparsable. Report zero segments; the next refresh recovers.
++    if (!timeline || !timeline.S_asArray) {
++      return {
++        numberOfSegments: 0,
++        mediaTimeOfLastSignaledSegment: NaN
++      };
++    }
++
+     var time = 0;
+     var scaledTime = 0;
+     var availableSegments = 0;
+@@ -14219,7 +14230,14 @@ function TimelineSegmentsGetter(config, isDynamic) {
+ 
+   function iterateSegments(representation, iterFunc) {
+     var base = representation.adaptation.period.mpd.manifest.Period_asArray[representation.adaptation.period.index].AdaptationSet_asArray[representation.adaptation.index].Representation_asArray[representation.index].SegmentTemplate || representation.adaptation.period.mpd.manifest.Period_asArray[representation.adaptation.period.index].AdaptationSet_asArray[representation.adaptation.index].Representation_asArray[representation.index].SegmentList;
+-    var timeline = base.SegmentTimeline;
++    var timeline = base ? base.SegmentTimeline : null;
++
++    // HOAST360 patch: see getMediaFinishedInformation — tolerate a timeline
++    // that is missing mid-MPD-update; callers handle "no segment found".
++    if (!timeline || !timeline.S_asArray) {
++      return;
++    }
++
+     var list = base.SegmentURL_asArray;
+     var time = 0;
+     var relativeIdx = -1;
+@@ -52826,6 +52844,14 @@ function TextSourceBuffer(config) {
+       }
+ 
+       samplesInfo = boxParser.getSamplesInfo(bytes);
++
++      // HOAST360 patch: WebM segments carry no ISOBMFF samples, so there is
++      // no embedded CEA-608 to extract (and _extractCea608Data would return
++      // null, crashing on allCcData.fields below). Skip quietly.
++      if (!samplesInfo || samplesInfo.sampleList.length === 0) {
++        return;
++      }
++
+       var sequenceNumber = samplesInfo.lastSequenceNumber;
+       var chunkStart = Math.trunc(chunk.start);
+       var chunkEnd = Math.trunc(chunk.end);
+@@ -54982,6 +55008,19 @@ function BoxParser() {
+     var moofBoxes = isoFile.getBoxes('moof'); // exactly one mfhd per moof
+ 
+     var mfhdBoxes = isoFile.getBoxes('mfhd');
++
++    // HOAST360 patch: non-ISOBMFF media segments (e.g. WebM live streams)
++    // contain no moof/mfhd boxes; return the same empty shape as for an
++    // empty buffer instead of crashing on mfhdBoxes[-1].sequence_number.
++    if (moofBoxes.length === 0 || mfhdBoxes.length === 0) {
++      return {
++        sampleList: [],
++        lastSequenceNumber: NaN,
++        totalDuration: NaN,
++        numSequences: 0
++      };
++    }
++
+     var sampleDuration, sampleCompositionTimeOffset, sampleCount, sampleSize, sampleDts, sampleList, sample, i, j, k, l, m, n, dataOffset, lastSequenceNumber, numSequences, totalDuration;
+     numSequences = isoFile.getBoxes('moof').length;
+     lastSequenceNumber = mfhdBoxes[mfhdBoxes.length - 1].sequence_number;

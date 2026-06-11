@@ -29,6 +29,15 @@ const config = {
     },
     resolve: {
         extensions: ['.js'],
+        alias: {
+            // Bundle the readable debug build instead of the prebuilt min:
+            // patches/dashjs+4.7.4.patch (applied by patch-package) fixes live
+            // WebM crashes there, and reviewing a patch against the minified
+            // single-line build would be impossible. Production mode
+            // re-minifies via terser, and the single alias keeps every
+            // `import 'dashjs'` (incl. videojs-contrib-dash) on one instance.
+            'dashjs$': 'dashjs/dist/dash.all.debug.js'
+        }
     },
     plugins: [
         new ESLintPlugin({

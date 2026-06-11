@@ -4,6 +4,7 @@
   "description": "360 degree video player with dynamic binaural higher-order ambisonics rendering, depending on view direction and zoom factor.",
   "main": "hoast360.js",
   "scripts": {
+    "postinstall": "patch-package",
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "webpack --mode development",
     "production-build": "webpack --mode production",
@@ -24,6 +25,7 @@
     "eslint": "^8.57.1",
     "eslint-webpack-plugin": "^4.2.0",
     "http-server": "^14.1.1",
+    "patch-package": "^8.0.1",
     "style-loader": "^4.0.0",
     "webpack": "^5.97.0",
     "webpack-bundle-analyzer": "^5.0.0",
