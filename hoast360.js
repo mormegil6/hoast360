@@ -40,6 +40,20 @@ import './css/hoast360.css';
 
 "use strict";
 
+// Live streams: start 30 s behind the live edge. ffmpeg writes the live MPD
+// non-atomically and announces segments at the edge before they are fully on
+// disk, so joining near the edge stalls and gap-jumps on startup. dash.js
+// gives an explicit liveDelay precedence over the MPD's
+// suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
+const LIVE_DELAY_S = 30;
+
+// The combined-MPD path runs on videojs-contrib-dash's own inlined dash.js
+// (not the dashjs package import!), reachable only through this hook — it
+// fires after the MediaPlayer is created, before initialize().
+videojs.Html5DashJS.hook('beforeinitialize', function (player, mediaPlayer) {
+    mediaPlayer.updateSettings({ streaming: { delay: { liveDelay: LIVE_DELAY_S } } });
+});
+
 export class HOAST360 {
     constructor() {
         this.order = 0;
@@ -135,6 +149,8 @@ export class HOAST360 {
             this.audioPlayer = null;
         } else { // load audio and video from separate mpds
             this.audioPlayer = dashjs.MediaPlayer().create();
+            // keep the audio delay identical to the video player's (hook above)
+            this.audioPlayer.updateSettings({ streaming: { delay: { liveDelay: LIVE_DELAY_S } } });
             if (!this.sourceNode)
                 this.sourceNode = this.context.createMediaElementSource(this.audioElement);
                 
