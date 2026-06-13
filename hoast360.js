@@ -48,7 +48,7 @@ import './css/hoast360.css';
 const LIVE_DELAY_S = 30;
 
 // The combined-MPD path runs on videojs-contrib-dash's own inlined dash.js
-// (not the dashjs package import!), reachable only through this hook — it
+// (not the dashjs package import!), reachable only through this hook. It
 // fires after the MediaPlayer is created, before initialize().
 videojs.Html5DashJS.hook('beforeinitialize', function (player, mediaPlayer) {
     mediaPlayer.updateSettings({ streaming: { delay: { liveDelay: LIVE_DELAY_S } } });
