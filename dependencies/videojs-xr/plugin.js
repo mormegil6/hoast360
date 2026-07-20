@@ -133,6 +133,21 @@ class Xr extends Plugin {
         if (!this.initialized_) {
             return;
         }
+        // The mono drawing buffer is sized only once, in init(), from
+        // player.currentWidth()/currentHeight(). On mobile those can read 0 at
+        // that instant (vjs-fluid applies its aspect-ratio height after the
+        // loadedmetadata that drives init) and no window 'resize' event need
+        // follow, so the buffer stays 0-area and the CSS-stretched canvas paints
+        // solid black with no recovery. Re-apply the size whenever the player's
+        // reported size changes to a valid value. Skipped while an XR session
+        // presents, because WebXRManager owns the framebuffer/viewport then.
+        if (!this.xrActive) {
+            const w = this.player.currentWidth();
+            const h = this.player.currentHeight();
+            if (w && h && (w !== this.lastWidth_ || h !== this.lastHeight_)) {
+                this.handleResize_();
+            }
+        }
         if (this.getVideoEl_().readyState === this.getVideoEl_().HAVE_ENOUGH_DATA) {
             if (this.videoTexture) {
                 this.videoTexture.needsUpdate = true;
@@ -157,8 +172,25 @@ class Xr extends Plugin {
         const width = this.player.currentWidth();
         const height = this.player.currentHeight();
 
+        // A collapsed layout (mobile can report 0 while vjs-fluid has not yet
+        // applied its aspect-ratio height) must not bake a 0-area buffer or a
+        // W/0 == Infinity aspect. Leave the last good size and retry next tick.
+        if (!width || !height) {
+            return;
+        }
+
+        // Upstream videojs-vr resizes the renderer on every resize; this fork
+        // dropped it, which is why the mono buffer stayed frozen at its init
+        // size and rendered black when init sampled 0. Restore it here.
+        if (this.renderer) {
+            this.renderer.setSize(width, height);
+        }
+
         this.camera.aspect = width / height;
         this.camera.updateProjectionMatrix();
+
+        this.lastWidth_ = width;
+        this.lastHeight_ = height;
     }
 
     init() {
