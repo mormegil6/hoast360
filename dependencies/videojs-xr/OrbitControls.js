@@ -363,6 +363,15 @@ var OrbitControls = function ( object, domElement ) {
 
 	}
 
+	// HOAST360: OrbitOrientationControls drives the device-orientation (gyro)
+	// path by calling these as instance methods, but upstream keeps them private
+	// to this closure. Without them the gyro branch throws
+	// "this.orbit.rotateLeft is not a function" every frame on any device with an
+	// orientation sensor (Android, iOS), which kills the render loop and leaves
+	// the sphere black while audio plays. Desktop has no sensor so never hit it.
+	scope.rotateLeft = rotateLeft;
+	scope.rotateUp = rotateUp;
+
 	var panLeft = function () {
 
 		var v = new Vector3();
