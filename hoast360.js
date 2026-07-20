@@ -46,7 +46,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf4';   // diagnostic badge + gl.maxTextureSize
+const BUILD_TAG = 'rf5';   // diagnostic badge + gl.maxTextureSize
 
 // The combined-MPD path runs on videojs-contrib-dash's own inlined dash.js
 // (not the dashjs package import!), reachable only through this hook. It
