@@ -146,6 +146,7 @@ export class HOAST360 {
                 this.sourceNode = this.context.createMediaElementSource(this.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el());
             
             this.videoPlayer.src({ type: 'application/dash+xml', src: this.mediaUrl });
+            this._wireQualityLevels();
             this.audioPlayer = null;
         } else { // load audio and video from separate mpds
             this.audioPlayer = dashjs.MediaPlayer().create();
@@ -170,6 +171,59 @@ export class HOAST360 {
             if (scope.audioPlayer)
                 scope.playbackEventHandler.initialize(scope.videoPlayer, scope.audioPlayer);
         });
+    }
+
+    // Bridge dash.js video renditions into video.js's qualityLevels() list, so the
+    // httpSourceSelector menu (auto / 1920p / ... / 360p) populates for DASH (which
+    // videojs-contrib-dash does not do on its own). Picking a rung pins dash.js to
+    // it; "auto" re-enables dash.js ABR.
+    _wireQualityLevels() {
+        let player = this.videoPlayer;
+        let qualityLevels = player.qualityLevels();
+        let wired = false;
+        let attach = function () {
+            if (wired) return;
+            let mp = player.dash && player.dash.mediaPlayer;
+            if (!mp || !mp.getBitrateInfoListFor) return;
+            wired = true;
+            let reconcileTimer = null;
+            let reconcile = function () {
+                let on = [];
+                for (let i = 0; i < qualityLevels.length; i++)
+                    if (qualityLevels[i].enabled) on.push(i);
+                // all (or none) enabled -> dash.js ABR ("auto"); exactly one -> pin it
+                let auto = (on.length === 0 || on.length === qualityLevels.length);
+                mp.updateSettings({ streaming: { abr: { autoSwitchBitrate: { video: auto } } } });
+                if (!auto) mp.setQualityFor('video', on[on.length - 1], true);
+            };
+            let schedule = function () {
+                if (reconcileTimer) clearTimeout(reconcileTimer);
+                reconcileTimer = setTimeout(reconcile, 0);   // coalesce the menu's per-level sets
+            };
+            let populate = function () {
+                if (qualityLevels.length) return;   // add the rungs once
+                let reps = mp.getBitrateInfoListFor('video') || [];
+                reps.forEach(function (rep) {
+                    qualityLevels.addQualityLevel({
+                        id: 'v' + rep.qualityIndex,
+                        width: rep.width,
+                        height: rep.height,
+                        bandwidth: rep.bitrate,   // the lib reads .bandwidth, not .bitrate
+                        enabled: function (enable) {
+                            if (enable === undefined) return this.__on !== false;
+                            this.__on = enable;
+                            schedule();           // menu selection -> drive dash.js directly
+                            return enable;
+                        }
+                    });
+                });
+            };
+            mp.on('streamInitialized', populate);
+            populate();   // in case the stream is already initialized
+        };
+        attach();
+        player.one('loadstart', attach);
+        player.one('loadedmetadata', attach);
     }
 
     reset() {
