@@ -46,7 +46,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf1';   // shown in the ?dbg badge; bump per build so recordings are unambiguous (rf1 = render-fix baseline)
+const BUILD_TAG = 'rf3';   // diagnostic badge + gl.maxTextureSize
 
 // The combined-MPD path runs on videojs-contrib-dash's own inlined dash.js
 // (not the dashjs package import!), reachable only through this hook. It
@@ -146,17 +146,34 @@ export class HOAST360 {
         // an A/V-sync experiment is worthless if you cannot tell which liveDelay
         // was actually loaded (cache makes that ambiguous).
         try {
-            // Only with ?dbg in the URL: a build/liveDelay badge so a screen
-            // recording self-documents which build it captured. Hidden for visitors.
+            // Only with ?dbg in the URL: a badge showing the build plus the live
+            // renderer/video state, so a mobile screenshot pinpoints why the
+            // sphere is black or warped (element size vs drawing-buffer size vs
+            // camera aspect vs whether the video is actually playing). Hidden for
+            // visitors.
             if (new URLSearchParams(window.location.search).has('dbg')) {
                 var badge = document.getElementById('ld-badge') || document.createElement('div');
                 badge.id = 'ld-badge';
-                badge.textContent = BUILD_TAG + ' · liveDelay ' + LIVE_DELAY_S + 's';
-                badge.style.cssText = 'position:absolute;top:8px;left:8px;z-index:9999;'
-                    + 'background:rgba(0,0,0,.6);color:#0f0;font:12px monospace;'
-                    + 'padding:3px 7px;border-radius:4px;pointer-events:none';
+                badge.style.cssText = 'position:absolute;top:8px;left:8px;z-index:9999;white-space:pre;'
+                    + 'background:rgba(0,0,0,.72);color:#0f0;font:11px monospace;line-height:1.35;'
+                    + 'padding:4px 7px;border-radius:4px;pointer-events:none';
                 var host = document.querySelector('.player') || document.body;
                 if (host && badge.parentNode !== host) host.appendChild(badge);
+                var badgeScope = this;
+                if (!window.__ldBadgeTimer) window.__ldBadgeTimer = setInterval(function () {
+                    try {
+                        var p = badgeScope.videoPlayer;
+                        var xr = (p && p.xr) ? p.xr() : null;
+                        var r = xr && xr.renderer, cam = xr && xr.camera;
+                        var v = (host && host.querySelector('video')) || document.querySelector('video');
+                        badge.textContent = BUILD_TAG + ' · ld' + LIVE_DELAY_S + 's'
+                            + '\nelem  ' + (p ? p.currentWidth() + 'x' + p.currentHeight() : '?')
+                            + '\nbuf   ' + (r && r.domElement ? r.domElement.width + 'x' + r.domElement.height : '?')
+                            + '\naspect ' + (cam ? cam.aspect.toFixed(3) : '?')
+                            + '\nvideo ' + (v ? v.videoWidth + 'x' + v.videoHeight + ' pause' + (v.paused ? 1 : 0) + ' rs' + v.readyState : '?')
+                            + '\ngl.max ' + (r && r.capabilities ? r.capabilities.maxTextureSize : '?');
+                    } catch (e) { badge.textContent = BUILD_TAG + ' dbg:' + (e && e.message); }
+                }, 1000);
             }
         } catch (e) { /* badge is best-effort, never block playback */ }
 
