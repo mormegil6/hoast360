@@ -34,6 +34,7 @@ import PlaybackEventHandler from './dependencies/PlaybackEventHandler.js';
 import HOASTloader from './dependencies/HoastLoader.js';
 import HOASTBinDecoder from './dependencies/HoastBinauralDecoder.js';
 import HOASTRotator from './dependencies/HoastRotator.js';
+import SegmentAudioFeed from './dependencies/SegmentAudioFeed.js';
 import { isMobileTabletVRDevice } from './dependencies/UserAgentChecker.js';
 import './css/video-js.css';
 import './css/hoast360.css';
@@ -46,13 +47,28 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf5';   // diagnostic badge + gl.maxTextureSize
+const BUILD_TAG = 'rf6';   // diagnostic badge + gl.maxTextureSize
+
+// Chromium delays any Web Audio tap on an MSE-fed element by ~2 s (measured:
+// invariant under liveDelay, dash.js buffer targets, captureStream, and
+// element playbackRate). Only Chromium engines get the segment-audio feed;
+// Firefox is already in sync on the element path and unknown engines default
+// to the safe legacy wiring.
+// UA-only test: Firefox and WebKit Safari never carry "Chrome/", while every
+// Chromium build (Chrome, Brave, Edge, HeadlessChrome) does. window.chrome is
+// deliberately NOT required: headless Chromium omits it and would silently
+// fall back to the legacy path in test harnesses.
+const IS_CHROMIUM = typeof navigator !== 'undefined' && /Chrome\//.test(navigator.userAgent);
 
 // The combined-MPD path runs on videojs-contrib-dash's own inlined dash.js
 // (not the dashjs package import!), reachable only through this hook. It
-// fires after the MediaPlayer is created, before initialize().
+// fires after the MediaPlayer is created, before initialize(). NOTE: it fires
+// on BOTH the combined and the separate-MPD path, so feed attachment is gated
+// by the flag the owning instance sets before calling src().
 videojs.Html5DashJS.hook('beforeinitialize', function (player, mediaPlayer) {
     mediaPlayer.updateSettings({ streaming: { delay: { liveDelay: LIVE_DELAY_S } } });
+    var h = player.__hoast360;
+    if (h && h._useSegmentFeed) h._attachSegmentFeed(mediaPlayer);
 });
 
 export class HOAST360 {
@@ -106,6 +122,8 @@ export class HOAST360 {
                 httpSourceSelector: { default: 'auto' }
             }
         });
+        // lets the static beforeinitialize hook find the owning instance
+        this.videoPlayer.__hoast360 = this;
 
         let scope = this;
         this.videoPlayer.on('play', function () {
@@ -141,6 +159,17 @@ export class HOAST360 {
         this.mediaUrl = newMediaUrl;
         this.irUrl = newIrUrl;
         this._setOrderDependentVariables();
+
+        // Segment-audio feed (combined-MPD path, Chromium only): bypasses the
+        // MSE element tap and its fixed ~2 s delay. Must be decided BEFORE
+        // src() below, because the beforeinitialize hook reads the flag.
+        // ?legacyaudio forces the old wiring for A/B measurements.
+        this._xrReady = false;
+        this._feedN = 0;
+        this._feedDegraded = false;
+        this._useSegmentFeed = IS_CHROMIUM
+            && this.mediaUrl.includes('.mpd')
+            && !new URLSearchParams(window.location.search).has('legacyaudio');
 
         // Debug badge so a screen recording self-documents which build it is:
         // an A/V-sync experiment is worthless if you cannot tell which liveDelay
@@ -180,7 +209,22 @@ export class HOAST360 {
         if (this.mediaUrl.includes(".mpd")) { // in this case audio and video are inside the same mpd
             if (!this.sourceNode)
                 this.sourceNode = this.context.createMediaElementSource(this.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el());
-            
+
+            if (this._useSegmentFeed && !this._elementSink) {
+                // A captured element only advances while its audio is pulled by
+                // the rendering graph: leaving the capture unconnected freezes
+                // the media clock outright (measured: buffered grows, paused
+                // false, readyState 4, currentTime frozen). Pull it through a
+                // zero-gain sink instead: the clock runs, the element stays
+                // inaudible, and user unmute still cannot cause double audio.
+                // The legacy path needs none of this: there the capture feeds
+                // the HOA graph directly.
+                this._elementSink = this.context.createGain();
+                this._elementSink.gain.value = 0;
+                this.sourceNode.connect(this._elementSink);
+                this._elementSink.connect(this.context.destination);
+            }
+
             this.videoPlayer.src({ type: 'application/dash+xml', src: this.mediaUrl });
             this._wireQualityLevels();
             this.audioPlayer = null;
@@ -201,6 +245,7 @@ export class HOAST360 {
 
         this.videoPlayer.xr().on("initialized", function () {
             console.log("xr initialized");
+            scope._xrReady = true;
             scope._startSetup();
 
             // playback event handler is only needed if we have separate audio and video players
@@ -281,17 +326,76 @@ export class HOAST360 {
     }
 
     _disconnectAudio() {
-        this.sourceNode.disconnect();
-        this.rotator.out.disconnect();
-        this.multiplier.out.disconnect();
-        this.decoder.out.disconnect();
-        this.masterGain.disconnect();
+        // feed teardown must run before dash.mediaPlayer.reset() so no
+        // listener remains on a dead MediaPlayer
+        if (this.audioFeed) { this.audioFeed.destroy(); this.audioFeed = null; }
+        // null-guards: with graph construction deferred to the first decode, a
+        // reset() can arrive before _setupAudio ever ran (masterGain is still
+        // the number 0 then), and an unguarded dereference wedges reset()
+        if (this.sourceNode) try { this.sourceNode.disconnect(); } catch (e) { /* already disconnected */ }
+        if (this._elementSink) { try { this._elementSink.disconnect(); } catch (e) { /* already disconnected */ } this._elementSink = null; }
+        if (this.rotator && this.rotator.out) this.rotator.out.disconnect();
+        if (this.multiplier && this.multiplier.out) this.multiplier.out.disconnect();
+        if (this.decoder && this.decoder.out) this.decoder.out.disconnect();
+        if (this.masterGain && this.masterGain.disconnect) this.masterGain.disconnect();
     }
 
     _startSetup() {
-        if (!this.audioSetupComplete && !this.videoSetupComplete) {
-            this._setupAudio();
-            this._setupVideo();
+        if (this.audioSetupComplete || this.videoSetupComplete) return;
+        if (!this._xrReady) return;
+        // Combined-path feed: wait for the first decoded segment so the graph
+        // is built with the stream's channel count (16 or 25), not the page's
+        // guess. With the 30 s live delay the first decode lands well before
+        // playout. If the feed degrades instead, build on the legacy path.
+        if (this._useSegmentFeed && !this._feedDegraded && !this._feedN) return;
+        this._setupAudio();
+        this._setupVideo();
+    }
+
+    _attachSegmentFeed(mediaPlayer) {
+        if (!this.audioFeed) {
+            let scope = this;
+            this.audioFeed = new SegmentAudioFeed({
+                context: this.context,
+                getElement: function () {
+                    try { return scope.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el(); }
+                    catch (e) { return document.querySelector('#hoast360-player video, .video-js video'); }
+                },
+                onReady: function (n) { scope._onFeedReady(n); },
+                onDegrade: function (why) { scope._onFeedDegrade(why); }
+            });
+            // read-only debug surface for measurement harnesses
+            window.__hoastAudioFeed = function () { return scope.audioFeed ? scope.audioFeed.stats() : null; };
+        }
+        this.audioFeed.attach(mediaPlayer);
+    }
+
+    _onFeedReady(n) {
+        let order = Math.round(Math.sqrt(n)) - 1;
+        if ((order + 1) * (order + 1) !== n || order < 1 || order > this.maxOrder) {
+            console.error('HOAST360: stream has ' + n + ' audio channels, which is not a supported ambisonic layout; using element audio');
+            if (this.audioFeed) this.audioFeed.forceDegrade('unsupported-channel-count');
+            return;
+        }
+        if (order !== this.order) {
+            console.warn('HOAST360: stream is order ' + order + ' (' + n + ' ch); page requested order '
+                + this.order + '. Using the stream order.');
+            this.order = order;
+            this._setOrderDependentVariables();
+        }
+        this._feedN = n;
+        this._startSetup();
+    }
+
+    _onFeedDegrade(reason) {
+        console.warn('HOAST360: element audio path takes over (' + reason + ')');
+        this._feedDegraded = true;
+        if (this.rotator && this.sourceNode) {
+            // graph already built: reconnect the field-tested legacy tap
+            this.sourceNode.channelCount = this.numCh;
+            this.sourceNode.connect(this.rotator.in);
+        } else {
+            this._startSetup();
         }
     }
 
@@ -330,9 +434,17 @@ export class HOAST360 {
                 scope.masterGain.gain.value = this.volume();
         });
 
-        this.sourceNode.channelCount = this.numCh;
-
-        this.sourceNode.connect(this.rotator.in);
+        if (this._useSegmentFeed && this.audioFeed && this._feedN && !this._feedDegraded) {
+            // The element's audio stays captured by the deliberately
+            // UNCONNECTED sourceNode (an unconnected MediaElementSource is a
+            // silent sink, so the element can never sound and user unmute
+            // cannot cause double audio). Decoded segment audio drives the
+            // graph instead, bypassing Chromium's fixed MSE tap delay.
+            this.audioFeed.connectTo(this.rotator.in);
+        } else {
+            this.sourceNode.channelCount = this.numCh;
+            this.sourceNode.connect(this.rotator.in);
+        }
 
         if (this.zoomEnabled) {
             this.rotator.out.connect(this.multiplier.in);
