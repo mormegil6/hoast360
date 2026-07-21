@@ -47,7 +47,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf9';   // diagnostic badge + gl.maxTextureSize
+const BUILD_TAG = 'rf10';  // diagnostic badge + gl.maxTextureSize
 
 // Chromium delays any Web Audio tap on an MSE-fed element by ~2 s (measured:
 // invariant under liveDelay, dash.js buffer targets, captureStream, and
@@ -167,16 +167,14 @@ export class HOAST360 {
         this._xrReady = false;
         this._feedN = 0;
         this._feedDegraded = false;
-        // Desktop Chromium only for now: the feed's per-segment 16/25-ch Opus
-        // pair-decode is unmeasured on phone CPUs (gate G6), and a phone that
-        // decodes slowly-but-successfully would glitch rather than cleanly
-        // degrade. Mobile keeps today's element audio (the ~1.7 s edit-list
-        // desync, but stable); ?audiofeed forces the feed on for mobile tests.
+        // All Chromium, mobile included: gate G6 (per-segment 16-ch Opus
+        // pair-decode on a real phone, via ?audiofeed) passed 2026-07-21 with
+        // no dropouts, and the degrade path covers weaker devices. ?legacyaudio
+        // still forces the old element-audio wiring anywhere.
         const qp = new URLSearchParams(window.location.search);
         this._useSegmentFeed = IS_CHROMIUM
             && this.mediaUrl.includes('.mpd')
-            && !qp.has('legacyaudio')
-            && (!isMobileTabletVRDevice() || qp.has('audiofeed'));
+            && !qp.has('legacyaudio');
 
         // Debug badge so a screen recording self-documents which build it is:
         // an A/V-sync experiment is worthless if you cannot tell which liveDelay
