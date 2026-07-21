@@ -47,7 +47,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf6';   // diagnostic badge + gl.maxTextureSize
+const BUILD_TAG = 'rf8';   // diagnostic badge + gl.maxTextureSize
 
 // Chromium delays any Web Audio tap on an MSE-fed element by ~2 s (measured:
 // invariant under liveDelay, dash.js buffer targets, captureStream, and
@@ -207,22 +207,58 @@ export class HOAST360 {
         } catch (e) { /* badge is best-effort, never block playback */ }
 
         if (this.mediaUrl.includes(".mpd")) { // in this case audio and video are inside the same mpd
-            if (!this.sourceNode)
-                this.sourceNode = this.context.createMediaElementSource(this.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el());
+            // Feed mode must not create a MediaElementSource AT ALL: an
+            // MSE-captured element connected anywhere in the graph flips the
+            // whole AudioContext output into Chromium's high-latency path
+            // (measured at the speakers: +1.65 s while the graph-level signal
+            // is in sync), and an unconnected capture freezes the element
+            // clock outright. So in feed mode the element is silenced by
+            // pinning muted instead, re-asserted against UI writes; the feed
+            // audio level follows the volume slider via masterGain.
+            // ?capture restores the captured variant for A/B measurement.
+            this._noCapture = this._useSegmentFeed
+                && !new URLSearchParams(window.location.search).has('capture');
 
-            if (this._useSegmentFeed && !this._elementSink) {
-                // A captured element only advances while its audio is pulled by
-                // the rendering graph: leaving the capture unconnected freezes
-                // the media clock outright (measured: buffered grows, paused
-                // false, readyState 4, currentTime frozen). Pull it through a
-                // zero-gain sink instead: the clock runs, the element stays
-                // inaudible, and user unmute still cannot cause double audio.
-                // The legacy path needs none of this: there the capture feeds
-                // the HOA graph directly.
-                this._elementSink = this.context.createGain();
-                this._elementSink.gain.value = 0;
-                this.sourceNode.connect(this._elementSink);
-                this._elementSink.connect(this.context.destination);
+            if (!this._noCapture) {
+                if (!this.sourceNode)
+                    this.sourceNode = this.context.createMediaElementSource(this.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el());
+
+                if (this._useSegmentFeed && !this._elementSink) {
+                    // captured variant: keep the capture pulled through zero
+                    // gain so the element clock advances while staying silent
+                    this._elementSink = this.context.createGain();
+                    this._elementSink.gain.value = 0;
+                    this.sourceNode.connect(this._elementSink);
+                    this._elementSink.connect(this.context.destination);
+                }
+            } else {
+                let scope2 = this;
+                let pin = function () {
+                    try {
+                        let el = scope2.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el();
+                        if (el && !el.muted) el.muted = true;
+                    } catch (e) { /* tech not ready yet */ }
+                };
+                pin();
+                this._mutePin = setInterval(pin, 500);
+                this.videoPlayer.on('volumechange', pin);
+
+                // videojs mirrors el.muted, which the pin holds true forever,
+                // so the mute button would show muted and do nothing. Reroute
+                // the player's muted() to a UI-intent flag driving masterGain:
+                // the button works again, the element stays silent.
+                if (!this._origMuted) {
+                    this._origMuted = this.videoPlayer.muted.bind(this.videoPlayer);
+                    this._uiMuted = false;
+                    this.videoPlayer.muted = function (m) {
+                        if (m === undefined) return scope2._uiMuted;
+                        scope2._uiMuted = !!m;
+                        if (scope2.masterGain && scope2.masterGain.gain)
+                            scope2.masterGain.gain.value = scope2._uiMuted ? 0 : scope2.videoPlayer.volume();
+                        scope2.videoPlayer.trigger('volumechange');
+                        return scope2.videoPlayer;
+                    };
+                }
             }
 
             this.videoPlayer.src({ type: 'application/dash+xml', src: this.mediaUrl });
@@ -334,6 +370,8 @@ export class HOAST360 {
         // the number 0 then), and an unguarded dereference wedges reset()
         if (this.sourceNode) try { this.sourceNode.disconnect(); } catch (e) { /* already disconnected */ }
         if (this._elementSink) { try { this._elementSink.disconnect(); } catch (e) { /* already disconnected */ } this._elementSink = null; }
+        if (this._mutePin) { clearInterval(this._mutePin); this._mutePin = null; }
+        if (this._origMuted) { this.videoPlayer.muted = this._origMuted; this._origMuted = null; }
         if (this.rotator && this.rotator.out) this.rotator.out.disconnect();
         if (this.multiplier && this.multiplier.out) this.multiplier.out.disconnect();
         if (this.decoder && this.decoder.out) this.decoder.out.disconnect();
@@ -390,6 +428,19 @@ export class HOAST360 {
     _onFeedDegrade(reason) {
         console.warn('HOAST360: element audio path takes over (' + reason + ')');
         this._feedDegraded = true;
+        if (this._noCapture) {
+            // no capture exists in this mode; emergency fallback is the raw
+            // element audio (non-spatial, with the Chromium skew): unpin mute
+            // and restore the player's native muted() so the UI drives the
+            // element again
+            if (this._mutePin) { clearInterval(this._mutePin); this._mutePin = null; }
+            if (this._origMuted) { this.videoPlayer.muted = this._origMuted; this._origMuted = null; }
+            try {
+                let el = this.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el();
+                if (el) el.muted = !!this._uiMuted;
+            } catch (e) { /* tech gone */ }
+            return;
+        }
         if (this.rotator && this.sourceNode) {
             // graph already built: reconnect the field-tested legacy tap
             this.sourceNode.channelCount = this.numCh;
@@ -427,6 +478,14 @@ export class HOAST360 {
         this.videoPlayer.on("volumechange", function () {
             if (!scope.masterGain)
                 return;
+
+            // In no-capture feed mode the element itself is pinned muted and
+            // the player's muted() is rerouted to the UI-intent flag, which
+            // together with the volume slider drives the feed audio level.
+            if (scope._noCapture && scope._useSegmentFeed && !scope._feedDegraded) {
+                scope.masterGain.gain.value = scope._uiMuted ? 0 : this.volume();
+                return;
+            }
 
             if (this.muted())
                 scope.masterGain.gain.value = 0;

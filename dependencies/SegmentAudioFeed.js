@@ -81,6 +81,7 @@ export default class SegmentAudioFeed {
         this.feedBus.gain.value = 1;
 
         this.epoch = 0;
+        this.presentationShiftS = 0; // video elst delay Chromium ignores (audio placed earlier by this)
         this.inits = new Map();      // representationId -> { bytes, epoch, timecodeScale }
         this.ring = [];              // { epoch, t, dur, bytes } sorted by t
         this.decoded = new Map();    // key -> { t, dur, buffer, lastUse }
@@ -165,7 +166,71 @@ export default class SegmentAudioFeed {
             ringT0: this.ring.length ? Math.round(this.ring[0].t) : null,
             ringT1: this.ring.length ? Math.round(this.ring[this.ring.length - 1].t + this.ring[this.ring.length - 1].dur) : null,
             outputLatency: Math.round(this.outputLatency * 1000),
+            presentationShiftMs: Math.round(this.presentationShiftS * 1000),
+            // the design's per-epoch sanity constant: content axis (cluster
+            // timestamp) minus placement axis (request.startTime) for the
+            // newest ring entry; a large constant here means dash.js's segment
+            // start times do not sit on the media PTS axis and placement must
+            // compensate
+            axisDeltaMs: this._axisDeltaMs(),
         };
+    }
+
+    // Net presentation delay from an fMP4 init segment's edit list: an empty
+    // edit (media_time -1) delays the track by duration/movieTimescale, and
+    // the first real edit's media_time trims head media. Firefox applies
+    // this; Chromium MSE does not, so Chromium presents the track early by
+    // the returned amount. Returns null when there is no edit list.
+    _parseElstShiftS(b) {
+        function u32(o) { return ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0; }
+        function find(fourcc, from) {
+            for (let i = from; i < b.length - 4; i++)
+                if (b[i] === fourcc.charCodeAt(0) && b[i + 1] === fourcc.charCodeAt(1)
+                    && b[i + 2] === fourcc.charCodeAt(2) && b[i + 3] === fourcc.charCodeAt(3)) return i;
+            return -1;
+        }
+        const elst = find('elst', 0);
+        if (elst < 0) return null;
+        let movieTs = 1000, mediaTs = 90000;
+        const mvhd = find('mvhd', 0);
+        if (mvhd > 0) movieTs = u32(mvhd + 4 + (b[mvhd + 4] === 1 ? 20 : 12)) || 1000;
+        const mdhd = find('mdhd', 0);
+        if (mdhd > 0) mediaTs = u32(mdhd + 4 + (b[mdhd + 4] === 1 ? 20 : 12)) || 90000;
+        const ver = b[elst + 4];
+        const count = u32(elst + 8);
+        let p = elst + 12, shift = 0;
+        for (let i = 0; i < count && p + (ver === 1 ? 20 : 12) <= b.length; i++) {
+            let dur, mt;
+            if (ver === 1) {
+                dur = u32(p) * 4294967296 + u32(p + 4);
+                const hi = u32(p + 8), lo = u32(p + 12);
+                mt = (hi === 0xFFFFFFFF && lo === 0xFFFFFFFF) ? -1 : hi * 4294967296 + lo;
+                p += 20;
+            } else {
+                dur = u32(p);
+                mt = u32(p + 4); if (mt === 0xFFFFFFFF) mt = -1;
+                p += 12;
+            }
+            if (mt === -1) shift += dur / movieTs;
+            else { shift -= mt / mediaTs; break; }
+        }
+        return shift;
+    }
+
+    _masterTime(el) {
+        // what Chromium actually displays: currentTime plus the edit-list
+        // delay it ignored; audio chases the picture, not the DASH clock
+        return el.currentTime + this.presentationShiftS;
+    }
+
+    _axisDeltaMs() {
+        if (!this.ring.length) return null;
+        const entry = this.ring[this.ring.length - 1];
+        const init = this._initFor(entry.epoch);
+        if (!init) return null;
+        const c = this._clusterTimestampS(entry.bytes, init.timecodeScale);
+        if (c == null) return null;
+        return Math.round((c - entry.t) * 1000);
     }
 
     destroy() {
@@ -245,6 +310,22 @@ export default class SegmentAudioFeed {
         if (this.destroyed || this.degraded) return;
         if (!e || e.error || !e.response || !e.request) return;
         const r = e.request;
+
+        // Video init segments carry the key to Chromium's constant A/V skew:
+        // ffmpeg dashenc expresses the contribution's video start delay as an
+        // edit list (empty edit + media offset). Firefox honors it; Chromium's
+        // MSE ignores edit lists, so Chromium paints video EARLY by exactly
+        // the edit's net delay. Audio must be placed that much earlier to
+        // match what Chromium actually displays.
+        if ((r.mediaType || '') === 'video' && r.type === 'InitializationSegment') {
+            const shift = this._parseElstShiftS(new Uint8Array(e.response));
+            if (shift != null && Math.abs(shift - this.presentationShiftS) > 0.001) {
+                this.presentationShiftS = shift;
+                if (this.anchor !== null) this._hardResync();
+            }
+            return;
+        }
+
         if ((r.mediaType || '') !== 'audio') return;
         const rep = String(r.representationId != null ? r.representationId : '0');
 
@@ -510,7 +591,7 @@ export default class SegmentAudioFeed {
             this.state = 'running';
         }
 
-        const playhead = el.currentTime;
+        const playhead = this._masterTime(el);
         this._ensureDecoded(playhead);
         this._schedule(playhead);
         this._sampleDrift(el);
@@ -635,7 +716,7 @@ export default class SegmentAudioFeed {
         if (el.paused || el.seeking || el.readyState < 3 || el.playbackRate !== 1) return;
         // media time currently audible at the speakers
         const audible = this.anchor.mediaAt + (this.ctx.currentTime - this.outputLatency - this.anchor.ctxAt);
-        const drift = el.currentTime - audible; // positive: audio late
+        const drift = this._masterTime(el) - audible; // positive: audio late
         this.driftSamples.push(drift);
         if (this.driftSamples.length > 5) this.driftSamples.shift();
     }
