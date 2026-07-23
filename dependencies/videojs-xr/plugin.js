@@ -218,8 +218,18 @@ class Xr extends Plugin {
             this.scene.remove(this.movieScreen);
         }
 
-        // 360 equirectangular projection
-        this.movieGeometry = new THREE.SphereBufferGeometry(256, 32, 32);
+        // 360 equirectangular projection.
+        //
+        // Segment count matters more than it looks. UV interpolation across a
+        // quad is LINEAR, but the equirect->sphere mapping is not, so every
+        // quad bends whatever straight line crosses it. At the stock 32x32 a
+        // quad spans 11.25 deg of azimuth and the error is plainly visible on
+        // a test card: grid lines and colour-bar edges visibly undulate, worst
+        // at the poles where the azimuth segments converge into thin slivers
+        // (which is why the DOWN view looked the worst). 256x128 puts a quad
+        // at ~1.4 deg, cutting the error by roughly the square of that ratio,
+        // for 65k triangles - nothing for any GPU that is already decoding 8K.
+        this.movieGeometry = new THREE.SphereBufferGeometry(256, 256, 128);
         this.movieMaterial = new THREE.MeshBasicMaterial({ map: this.videoTexture, side: THREE.BackSide });
 
         this.movieScreen = new THREE.Mesh(this.movieGeometry, this.movieMaterial);
