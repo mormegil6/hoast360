@@ -9,6 +9,11 @@
 //  - dropped the babel-polyfill import (not needed for current browsers) and the
 //    package.json version import
 //  - plugin.css is imported here so the cardboard/VR buttons are styled
+//  - the equirect sphere is tessellated 256x128 instead of the upstream 32x32:
+//    the coarse mesh made straight lines visibly bow (UV interpolation is linear
+//    across each quad while the equirect->sphere map is not), worst at the poles.
+//    Applies to ALL content, not just test cards. See the SphereBufferGeometry
+//    call below.
 
 import videojs from 'video.js';
 import WebXRPolyfill from 'webxr-polyfill';
