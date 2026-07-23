@@ -66,7 +66,19 @@ const IS_CHROMIUM = typeof navigator !== 'undefined' && /Chrome\//.test(navigato
 // on BOTH the combined and the separate-MPD path, so feed attachment is gated
 // by the flag the owning instance sets before calling src().
 videojs.Html5DashJS.hook('beforeinitialize', function (player, mediaPlayer) {
-    mediaPlayer.updateSettings({ streaming: { delay: { liveDelay: LIVE_DELAY_S } } });
+    mediaPlayer.updateSettings({ streaming: {
+        delay: { liveDelay: LIVE_DELAY_S },
+        // Cap SourceBuffer depth so high-bitrate rungs stay within MSE quota. At
+        // dash.js defaults, >10 min VOD uses bufferTimeAtTopQualityLongForm = 60 s;
+        // 60 s of an 8K/60 Mbps rung is ~450 MB and throws QuotaExceededError, so
+        // dash.js thrashes (clear/refill = visible stutter). ~8 s forward keeps 8K
+        // well under quota; trades a thinner buffer for smooth top-quality playback.
+        buffer: {
+            bufferToKeep: 6,
+            bufferTimeAtTopQuality: 8,
+            bufferTimeAtTopQualityLongForm: 8
+        }
+    } });
     var h = player.__hoast360;
     if (h && h._useSegmentFeed) h._attachSegmentFeed(mediaPlayer);
 });
