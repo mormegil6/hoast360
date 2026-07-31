@@ -47,7 +47,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf12';  // diagnostic badge + gl.maxTextureSize
+const BUILD_TAG = 'rf13';  // diagnostic badge + gl.maxTextureSize
 
 // Chromium delays any Web Audio tap on an MSE-fed element by ~2 s (measured:
 // invariant under liveDelay, dash.js buffer targets, captureStream, and
@@ -212,10 +212,19 @@ export class HOAST360 {
                 // gate on means delivery is blocked (e.g. Chrome's Motion
                 // sensors site setting), not a player bug.
                 if (!window.__oriProbe) {
-                    window.__oriProbe = { n: 0, a: null };
+                    window.__oriProbe = { n: 0, a: null, pa: '?', pg: '?' };
                     window.addEventListener('deviceorientation', function (e) {
                         window.__oriProbe.n++; window.__oriProbe.a = e.alpha;
                     });
+                    // Chromium exposes the Motion-sensors site setting through the
+                    // Permissions API: denied here = the browser setting blocks
+                    // delivery, and no player code can see a single event.
+                    try {
+                        navigator.permissions.query({ name: 'accelerometer' })
+                            .then(function (s) { window.__oriProbe.pa = s.state; }, function () {});
+                        navigator.permissions.query({ name: 'gyroscope' })
+                            .then(function (s) { window.__oriProbe.pg = s.state; }, function () {});
+                    } catch (e) { /* non-Chromium: keep '?' */ }
                 }
                 if (!window.__ldBadgeTimer) window.__ldBadgeTimer = setInterval(function () {
                     try {
@@ -230,9 +239,11 @@ export class HOAST360 {
                             + '\naspect ' + (cam ? cam.aspect.toFixed(3) : '?')
                             + '\nvideo ' + (v ? v.videoWidth + 'x' + v.videoHeight + ' pause' + (v.paused ? 1 : 0) + ' rs' + v.readyState : '?')
                             + '\ngl.max ' + (r && r.capabilities ? r.capabilities.maxTextureSize : '?')
-                            + '\nori   ' + (o ? ((o.connected ? 'conn' : 'NOCONN') + (o.enabled ? '' : ' DISABLED')) : 'off(gate)')
+                            + '\nori   ' + (!xr || !xr.controls3d ? 'noctl'
+                                : (o ? ((o.connected ? 'conn' : 'NOCONN') + (o.enabled ? '' : ' DISABLED')) : 'off(gate)'))
                             + ' ev' + window.__oriProbe.n
-                            + (window.__oriProbe.a != null ? ' a' + window.__oriProbe.a.toFixed(0) : '');
+                            + (window.__oriProbe.a != null ? ' a' + window.__oriProbe.a.toFixed(0) : '')
+                            + '\nperm  acc:' + window.__oriProbe.pa + ' gyr:' + window.__oriProbe.pg;
                     } catch (e) { badge.textContent = BUILD_TAG + ' dbg:' + (e && e.message); }
                 }, 1000);
             }
