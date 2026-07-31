@@ -47,7 +47,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf11';  // diagnostic badge + gl.maxTextureSize
+const BUILD_TAG = 'rf12';  // diagnostic badge + gl.maxTextureSize
 
 // Chromium delays any Web Audio tap on an MSE-fed element by ~2 s (measured:
 // invariant under liveDelay, dash.js buffer targets, captureStream, and
@@ -206,18 +206,33 @@ export class HOAST360 {
                 var host = document.querySelector('.player') || document.body;
                 if (host && badge.parentNode !== host) host.appendChild(badge);
                 var badgeScope = this;
+                // deviceorientation delivery counter: ev grows only if the OS/
+                // browser actually hands sensor events to the page, which is the
+                // one link the emulated-sensor harness cannot test. ev0 with the
+                // gate on means delivery is blocked (e.g. Chrome's Motion
+                // sensors site setting), not a player bug.
+                if (!window.__oriProbe) {
+                    window.__oriProbe = { n: 0, a: null };
+                    window.addEventListener('deviceorientation', function (e) {
+                        window.__oriProbe.n++; window.__oriProbe.a = e.alpha;
+                    });
+                }
                 if (!window.__ldBadgeTimer) window.__ldBadgeTimer = setInterval(function () {
                     try {
                         var p = badgeScope.videoPlayer;
                         var xr = (p && p.xr) ? p.xr() : null;
                         var r = xr && xr.renderer, cam = xr && xr.camera;
                         var v = (host && host.querySelector('video')) || document.querySelector('video');
+                        var o = xr && xr.controls3d && xr.controls3d.orientation;
                         badge.textContent = BUILD_TAG + ' · ld' + LIVE_DELAY_S + 's'
                             + '\nelem  ' + (p ? p.currentWidth() + 'x' + p.currentHeight() : '?')
                             + '\nbuf   ' + (r && r.domElement ? r.domElement.width + 'x' + r.domElement.height : '?')
                             + '\naspect ' + (cam ? cam.aspect.toFixed(3) : '?')
                             + '\nvideo ' + (v ? v.videoWidth + 'x' + v.videoHeight + ' pause' + (v.paused ? 1 : 0) + ' rs' + v.readyState : '?')
-                            + '\ngl.max ' + (r && r.capabilities ? r.capabilities.maxTextureSize : '?');
+                            + '\ngl.max ' + (r && r.capabilities ? r.capabilities.maxTextureSize : '?')
+                            + '\nori   ' + (o ? ((o.connected ? 'conn' : 'NOCONN') + (o.enabled ? '' : ' DISABLED')) : 'off(gate)')
+                            + ' ev' + window.__oriProbe.n
+                            + (window.__oriProbe.a != null ? ' a' + window.__oriProbe.a.toFixed(0) : '');
                     } catch (e) { badge.textContent = BUILD_TAG + ' dbg:' + (e && e.message); }
                 }, 1000);
             }
