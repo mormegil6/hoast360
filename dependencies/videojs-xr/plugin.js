@@ -187,8 +187,12 @@ class Xr extends Plugin {
         // Upstream videojs-vr resizes the renderer on every resize; this fork
         // dropped it, which is why the mono buffer stayed frozen at its init
         // size and rendered black when init sampled 0. Restore it here.
+        // updateStyle is false on purpose: init() styles the canvas
+        // width/height as 100% so it tracks the player, and setSize's default
+        // would overwrite that with fixed pixel values and break fluid layouts.
+        // Only the drawing buffer should change here.
         if (this.renderer) {
-            this.renderer.setSize(width, height);
+            this.renderer.setSize(width, height, false);
         }
 
         this.camera.aspect = width / height;
