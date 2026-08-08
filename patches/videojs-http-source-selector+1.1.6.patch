@@ -1,0 +1,92 @@
+diff --git a/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.cjs.js b/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.cjs.js
+index 66ad1c6..cbbfc12 100644
+--- a/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.cjs.js
++++ b/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.cjs.js
+@@ -37,6 +37,18 @@ function (_MenuItem) {
+   var _proto = SourceMenuItem.prototype;
+ 
+   _proto.handleClick = function handleClick() {
++    // Deselect every sibling before selecting this one. video.js MenuItem marks
++    // the clicked item selected but never clears the previous, and the owning
++    // MenuButton only rebuilds items when the level LIST changes - which it does
++    // not here - so each click left another entry highlighted and the menu showed
++    // several resolutions as current at once.
++    var _menu = this.parentComponent_;
++    if (_menu && typeof _menu.children === "function") {
++      var _self = this;
++      _menu.children().forEach(function (child) {
++        if (child !== _self && typeof child.selected === "function") child.selected(false);
++      });
++    }
+     var selected = this.options_;
+     console.log("Changing quality to:", selected.label);
+ 
+diff --git a/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.es.js b/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.es.js
+index a3e1b60..a8c483c 100644
+--- a/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.es.js
++++ b/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.es.js
+@@ -33,6 +33,18 @@ function (_MenuItem) {
+   var _proto = SourceMenuItem.prototype;
+ 
+   _proto.handleClick = function handleClick() {
++    // Deselect every sibling before selecting this one. video.js MenuItem marks
++    // the clicked item selected but never clears the previous, and the owning
++    // MenuButton only rebuilds items when the level LIST changes - which it does
++    // not here - so each click left another entry highlighted and the menu showed
++    // several resolutions as current at once.
++    var _menu = this.parentComponent_;
++    if (_menu && typeof _menu.children === "function") {
++      var _self = this;
++      _menu.children().forEach(function (child) {
++        if (child !== _self && typeof child.selected === "function") child.selected(false);
++      });
++    }
+     var selected = this.options_;
+     console.log("Changing quality to:", selected.label);
+ 
+diff --git a/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.js b/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.js
+index 642ee73..07c90a2 100644
+--- a/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.js
++++ b/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.js
+@@ -45,6 +45,18 @@
+     var _proto = SourceMenuItem.prototype;
+ 
+     _proto.handleClick = function handleClick() {
++    // Deselect every sibling before selecting this one. video.js MenuItem marks
++    // the clicked item selected but never clears the previous, and the owning
++    // MenuButton only rebuilds items when the level LIST changes - which it does
++    // not here - so each click left another entry highlighted and the menu showed
++    // several resolutions as current at once.
++    var _menu = this.parentComponent_;
++    if (_menu && typeof _menu.children === "function") {
++      var _self = this;
++      _menu.children().forEach(function (child) {
++        if (child !== _self && typeof child.selected === "function") child.selected(false);
++      });
++    }
+       var selected = this.options_;
+       console.log("Changing quality to:", selected.label);
+ 
+diff --git a/node_modules/videojs-http-source-selector/src/components/SourceMenuItem.js b/node_modules/videojs-http-source-selector/src/components/SourceMenuItem.js
+index 40cf058..2a45897 100644
+--- a/node_modules/videojs-http-source-selector/src/components/SourceMenuItem.js
++++ b/node_modules/videojs-http-source-selector/src/components/SourceMenuItem.js
+@@ -12,6 +12,18 @@ class SourceMenuItem extends MenuItem
+   }
+ 
+   handleClick() {
++    // Deselect every sibling before selecting this one. video.js MenuItem marks
++    // the clicked item selected but never clears the previous, and the owning
++    // MenuButton only rebuilds items when the level LIST changes - which it does
++    // not here - so each click left another entry highlighted and the menu showed
++    // several resolutions as current at once.
++    var _menu = this.parentComponent_;
++    if (_menu && typeof _menu.children === "function") {
++      var _self = this;
++      _menu.children().forEach(function (child) {
++        if (child !== _self && typeof child.selected === "function") child.selected(false);
++      });
++    }
+     var selected = this.options_;
+     console.log("Changing quality to:", selected.label);
+     super.handleClick();
