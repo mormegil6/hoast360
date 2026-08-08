@@ -29,7 +29,7 @@ index 4ecc55a..cc753c5 100644
 -    var timeline = base.SegmentTimeline;
 +    var timeline = base ? base.SegmentTimeline : null;
 +
-+    // HOAST360 patch: see getMediaFinishedInformation — tolerate a timeline
++    // HOAST360 patch: see getMediaFinishedInformation - tolerate a timeline
 +    // that is missing mid-MPD-update; callers handle "no segment found".
 +    if (!timeline || !timeline.S_asArray) {
 +      return;
