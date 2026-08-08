@@ -1,5 +1,5 @@
 diff --git a/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.cjs.js b/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.cjs.js
-index 66ad1c6..cbbfc12 100644
+index 66ad1c6..9d0d0ce 100644
 --- a/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.cjs.js
 +++ b/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.cjs.js
 @@ -37,6 +37,18 @@ function (_MenuItem) {
@@ -21,8 +21,36 @@ index 66ad1c6..cbbfc12 100644
      var selected = this.options_;
      console.log("Changing quality to:", selected.label);
  
+@@ -44,6 +56,18 @@ function (_MenuItem) {
+ 
+     var levels = this.player().qualityLevels();
+ 
++    // Adaptive when nothing is pinned, i.e. every level still enabled.
++
++    // Without this the menu opens with NOTHING marked, because the rungs key
++
++    // off qualityLevels().selectedIndex, which is not meaningful until ABR has
++
++    // actually chosen - so the player looked like it had no setting at all.
++
++    var adaptive = true;
++
++    for (var _a = 0; _a < levels.length; _a++) { if (!levels[_a].enabled) { adaptive = false; break; } }
++
+     for (var i = 0; i < levels.length; i++) {
+       if (selected.index == levels.length) {
+         // If this is the Auto option, enable all renditions for adaptive selection
+@@ -124,7 +148,7 @@ function (_MenuButton) {
+ 
+     for (var i = 0; i < levels.length; i++) {
+       var index = levels.length - (i + 1);
+-      var selected = index === levels.selectedIndex; // Display height if height metadata is provided with the stream, else use bitrate
++      var selected = !adaptive && index === levels.selectedIndex; // Display height if height metadata is provided with the stream, else use bitrate
+ 
+       var label = "" + index;
+       var sortVal = index;
 diff --git a/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.es.js b/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.es.js
-index a3e1b60..a8c483c 100644
+index a3e1b60..e72261a 100644
 --- a/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.es.js
 +++ b/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.es.js
 @@ -33,6 +33,18 @@ function (_MenuItem) {
@@ -44,8 +72,36 @@ index a3e1b60..a8c483c 100644
      var selected = this.options_;
      console.log("Changing quality to:", selected.label);
  
+@@ -40,6 +52,18 @@ function (_MenuItem) {
+ 
+     var levels = this.player().qualityLevels();
+ 
++    // Adaptive when nothing is pinned, i.e. every level still enabled.
++
++    // Without this the menu opens with NOTHING marked, because the rungs key
++
++    // off qualityLevels().selectedIndex, which is not meaningful until ABR has
++
++    // actually chosen - so the player looked like it had no setting at all.
++
++    var adaptive = true;
++
++    for (var _a = 0; _a < levels.length; _a++) { if (!levels[_a].enabled) { adaptive = false; break; } }
++
+     for (var i = 0; i < levels.length; i++) {
+       if (selected.index == levels.length) {
+         // If this is the Auto option, enable all renditions for adaptive selection
+@@ -120,7 +144,7 @@ function (_MenuButton) {
+ 
+     for (var i = 0; i < levels.length; i++) {
+       var index = levels.length - (i + 1);
+-      var selected = index === levels.selectedIndex; // Display height if height metadata is provided with the stream, else use bitrate
++      var selected = !adaptive && index === levels.selectedIndex; // Display height if height metadata is provided with the stream, else use bitrate
+ 
+       var label = "" + index;
+       var sortVal = index;
 diff --git a/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.js b/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.js
-index 642ee73..07c90a2 100644
+index 642ee73..cfa21b0 100644
 --- a/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.js
 +++ b/node_modules/videojs-http-source-selector/dist/videojs-http-source-selector.js
 @@ -45,6 +45,18 @@
@@ -67,6 +123,66 @@ index 642ee73..07c90a2 100644
        var selected = this.options_;
        console.log("Changing quality to:", selected.label);
  
+@@ -52,6 +64,18 @@
+ 
+       var levels = this.player().qualityLevels();
+ 
++      // Adaptive when nothing is pinned, i.e. every level still enabled.
++
++      // Without this the menu opens with NOTHING marked, because the rungs key
++
++      // off qualityLevels().selectedIndex, which is not meaningful until ABR has
++
++      // actually chosen - so the player looked like it had no setting at all.
++
++      var adaptive = true;
++
++      for (var _a = 0; _a < levels.length; _a++) { if (!levels[_a].enabled) { adaptive = false; break; } }
++
+       for (var i = 0; i < levels.length; i++) {
+         if (selected.index == levels.length) {
+           // If this is the Auto option, enable all renditions for adaptive selection
+@@ -132,7 +156,7 @@
+ 
+       for (var i = 0; i < levels.length; i++) {
+         var index = levels.length - (i + 1);
+-        var selected = index === levels.selectedIndex; // Display height if height metadata is provided with the stream, else use bitrate
++        var selected = !adaptive && index === levels.selectedIndex; // Display height if height metadata is provided with the stream, else use bitrate
+ 
+         var label = "" + index;
+         var sortVal = index;
+diff --git a/node_modules/videojs-http-source-selector/src/components/SourceMenuButton.js b/node_modules/videojs-http-source-selector/src/components/SourceMenuButton.js
+index d810276..287c989 100644
+--- a/node_modules/videojs-http-source-selector/src/components/SourceMenuButton.js
++++ b/node_modules/videojs-http-source-selector/src/components/SourceMenuButton.js
+@@ -47,11 +47,17 @@ class SourceMenuButton extends MenuButton
+   createItems() {
+     var menuItems = [];
+     var levels = this.player().qualityLevels();
++    // Adaptive when nothing is pinned, i.e. every level still enabled.
++    // Without this the menu opens with NOTHING marked, because the rungs key
++    // off qualityLevels().selectedIndex, which is not meaningful until ABR has
++    // actually chosen - so the player looked like it had no setting at all.
++    var adaptive = true;
++    for (var _a = 0; _a < levels.length; _a++) { if (!levels[_a].enabled) { adaptive = false; break; } }
+     var labels = [];
+ 
+     for (var i = 0; i < levels.length; i++) {
+       var index = levels.length - (i + 1);
+-      var selected = (index === levels.selectedIndex);
++      var selected = (!adaptive && index === levels.selectedIndex);
+ 
+       // Display height if height metadata is provided with the stream, else use bitrate
+       var label = `${index}`;
+@@ -75,7 +81,7 @@ class SourceMenuButton extends MenuButton
+ 
+     // If there are multiple quality levels, offer an 'auto' option
+     if (levels.length > 1) {
+-      menuItems.push(new SourceMenuItem(this.player_, { label: 'Auto', index: levels.length, selected: false, sortVal: 99999 }));
++      menuItems.push(new SourceMenuItem(this.player_, { label: 'Auto', index: levels.length, selected: adaptive, sortVal: 99999 }));
+     }
+ 
+     // Sort menu items by their label name with Auto always first
 diff --git a/node_modules/videojs-http-source-selector/src/components/SourceMenuItem.js b/node_modules/videojs-http-source-selector/src/components/SourceMenuItem.js
 index 40cf058..2a45897 100644
 --- a/node_modules/videojs-http-source-selector/src/components/SourceMenuItem.js

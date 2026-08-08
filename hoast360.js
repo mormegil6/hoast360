@@ -47,7 +47,10 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf13';  // diagnostic badge + gl.maxTextureSize
+const BUILD_TAG = 'rf14';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+                            // any bundle change: it is the only build marker
+                            // visible in a deployed player, and 'is this the new
+                            // bundle?' cost real time on 2026-08-08 without it.
 
 // Chromium delays any Web Audio tap on an MSE-fed element by ~2 s (measured:
 // invariant under liveDelay, dash.js buffer targets, captureStream, and
