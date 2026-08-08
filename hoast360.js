@@ -47,7 +47,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf17';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf18';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -84,7 +84,83 @@ videojs.Html5DashJS.hook('beforeinitialize', function (player, mediaPlayer) {
     } });
     var h = player.__hoast360;
     if (h && h._useSegmentFeed) h._attachSegmentFeed(mediaPlayer);
+    attachDvrSeekClamp(player);
 });
+
+// FAILSAFE, not the fix - the fix is -seg_duration 2 at the earshot muxer
+// (docker-compose.yml, 2026-08-09). The muxer still rounds video up to the
+// next contribution keyframe, so any publisher whose GOP does not divide the
+// segment target reopens the trap this guards: a 3 s guest GOP makes 3 s video
+// segments against 2 s audio, -window_size counts SEGMENTS, so the video DVR
+// window outgrows audio's by ~100 s and dash.js advertises seekable time whose
+// audio is pruned. Seeking there wedges playback with NO error: readyState 1,
+// buffered empty, video.error null (measured 2026-08-08). With a public guest
+// port planned, "our own GOP is correct" is not a property we control.
+//
+// The clamp: read BOTH SegmentTimelines from the live manifest and bump any
+// seek below the later timeline's start up to it (+margin for the segment
+// being pruned right now). A mismatched publisher then degrades to a shorter
+// usable DVR instead of a silent hang.
+//
+// From the MANIFEST, not from dash.js's accounting, and that is a measured
+// decision: the first version asked getCurrentDVRInfo('audio')/('video') and
+// the inlined dash.js 4.2 build returned nothing for audio, so the clamp saw
+// only the video start and bumped a doomed seek to a different doomed time
+// (t=5 -> t=80.79, still ~90 s inside the dead zone, still readyState 1).
+// The manifest is ground truth: both <SegmentTimeline> starts share one media
+// timeline origin in ffmpeg's live MPD, so (audioStart - videoStart) is the
+// dead-zone width, offset-free, and element seekable.start() is video-derived
+// (that asymmetry IS the bug), so safe = seekable.start + delta + margin.
+//
+// The fetch is same-origin, ~2 KB, cached for 3 s, and asynchronous: the first
+// application uses the cached delta, the refreshed one re-applies. A second
+// 'seeking' event fired by our own correction lands at/above the safe point,
+// so it cannot loop, and every failure path leaves the seek untouched.
+function attachDvrSeekClamp(player) {
+    if (player.__dvrClampAttached) return;   // hook can re-fire on src changes
+    player.__dvrClampAttached = true;
+    var el = player.el() && player.el().querySelector('video');
+    if (!el) return;
+    var MARGIN_S = 4;            // two audio segments: clear of the pruning edge
+    var cachedDelta = null;      // audioStart - videoStart, seconds; null = unknown
+    var lastFetch = 0;
+
+    function parseDelta(mpd) {
+        if (!/type="dynamic"/.test(mpd)) return null;      // live manifests only
+        var starts = {};
+        mpd.split(/(?=<AdaptationSet)/).forEach(function (blk) {
+            var mime = /mimeType="(audio|video)/.exec(blk);
+            var ts = /timescale="(\d+)"/.exec(blk);
+            var s = /<S t="(\d+)"/.exec(blk);              // first S carries the window start
+            if (mime && ts && s) starts[mime[1]] = parseInt(s[1], 10) / parseInt(ts[1], 10);
+        });
+        if (!('audio' in starts) || !('video' in starts)) return null;
+        return starts.audio - starts.video;
+    }
+
+    function applyClamp() {
+        try {
+            if (cachedDelta === null || cachedDelta <= 0) return;   // audio covers video: nothing to guard
+            if (!el.seekable.length) return;
+            var safe = el.seekable.start(0) + cachedDelta + MARGIN_S;
+            if (el.currentTime < safe && isFinite(safe)) el.currentTime = safe;
+        } catch (e) { /* a failed clamp must never break a working seek */ }
+    }
+
+    el.addEventListener('seeking', function () {
+        if (el.duration !== Infinity) return;              // live only; VOD durations are finite
+        applyClamp();                                      // immediate, from the cached delta
+        var now = Date.now();
+        if (now - lastFetch < 3000) return;
+        lastFetch = now;
+        try {
+            fetch(player.currentSrc(), { cache: 'no-store' })
+                .then(function (r) { return r.text(); })
+                .then(function (x) { cachedDelta = parseDelta(x); applyClamp(); })
+                .catch(function () { /* keep the previous delta */ });
+        } catch (e) { /* no fetch, no clamp - never break the seek */ }
+    });
+}
 
 export class HOAST360 {
     constructor() {
