@@ -47,7 +47,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf18';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf19';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -267,6 +267,35 @@ export class HOAST360 {
             && this.mediaUrl.includes('.mpd')
             && !qp.has('legacyaudio');
 
+        // ?beta - RENDER AT THE DISPLAY'S REAL PIXEL RATIO.
+        //
+        // videojs-xr constructs THREE.WebGLRenderer with a devicePixelRatio
+        // option, which is NOT a WebGLRenderer option: three.js reads the ratio
+        // only through setPixelRatio(), and nothing ever calls it. The renderer
+        // therefore sits at its default ratio of 1, the WebGL canvas is
+        // allocated at CSS size, and the browser upscales it to the physical
+        // pixels - a 2x softening in each direction on a 2x display.
+        //
+        // Measured 2026-08-12 on the concert master: at a 100 deg viewport a
+        // 4096-wide equirect supplies ~1138 real pixels, so an ~800 px canvas
+        // sits BELOW the source's detail and discards some of it. Rendering at
+        // 1600 scores 47.5 dB PSNR against that native detail versus 40.2 dB
+        // for the 800 px canvas upscaled: a 7.3 dB gain. Above ~1138 px there
+        // is nothing further to recover, so this saturates rather than
+        // improving without limit.
+        //
+        // GATED, not default: DPR 2 quadruples fragment work and this player
+        // already runs a 16-convolver ambisonic graph beside it. Opt-in until
+        // the Quest and the Mac Mini have been measured.
+        // The flag only. An earlier version of this called setPixelRatio here
+        // and it did NOTHING: videojs-xr creates the renderer later, so
+        // videoPlayer.xr().renderer is still undefined at this point and the
+        // call went into a catch. That is the very bug being fixed - a
+        // pixel-ratio call that looks right and has no effect - so the real
+        // work happens where the renderer is constructed, in the xr plugin.
+        this._betaPixelRatio = qp.has('beta');
+        window.__hoastBetaDPR = this._betaPixelRatio;
+
         // Debug badge so a screen recording self-documents which build it is:
         // an A/V-sync experiment is worthless if you cannot tell which liveDelay
         // was actually loaded (cache makes that ambiguous).
@@ -276,7 +305,7 @@ export class HOAST360 {
             // sphere is black or warped (element size vs drawing-buffer size vs
             // camera aspect vs whether the video is actually playing). Hidden for
             // visitors.
-            if (new URLSearchParams(window.location.search).has('dbg')) {
+            if (qp.has('dbg') || qp.has('beta')) {
                 var badge = document.getElementById('ld-badge') || document.createElement('div');
                 badge.id = 'ld-badge';
                 badge.style.cssText = 'position:absolute;top:8px;left:8px;z-index:9999;white-space:pre;'
@@ -305,6 +334,43 @@ export class HOAST360 {
                             .then(function (s) { window.__oriProbe.pg = s.state; }, function () {});
                     } catch (e) { /* non-Chromium: keep '?' */ }
                 }
+                // FRAME RATE, sampled from rAF. On a headset there is no
+                // console to read, so the number has to be on screen and has to
+                // survive a screenshot: show the current rate plus the WORST
+                // one-second bucket since load, because a mean hides exactly the
+                // stutter that would make DPR 2 unusable.
+                if (!window.__fpsProbe) {
+                    window.__fpsProbe = { n: 0, fps: 0, min: 999, t0: performance.now(),
+                                          skip: true, hid: 0 };
+                    // A HIDDEN TAB MUST NOT COUNT. Browsers throttle rAF to about
+                    // 1 Hz in a background tab, so a single tab-away would pin
+                    // `worst` at a single digit for the rest of the session and
+                    // destroy exactly the long unattended watch this number is
+                    // for. Buckets that touch a hidden period are discarded, and
+                    // the first bucket after returning is skipped too because it
+                    // straddles the transition. hid counts how many times that
+                    // happened, so the reading stays honest about what it missed.
+                    document.addEventListener('visibilitychange', function () {
+                        var f = window.__fpsProbe;
+                        if (document.hidden) { f.hid++; }
+                        f.skip = true; f.n = 0; f.t0 = performance.now();
+                    });
+                    (function tick() {
+                        var f = window.__fpsProbe;
+                        f.n++;
+                        var now = performance.now(), dt = now - f.t0;
+                        if (dt >= 1000) {
+                            f.fps = Math.round(f.n * 1000 / dt);
+                            if (f.skip || document.hidden) {
+                                f.skip = false;          // discard this bucket only
+                            } else {
+                                f.min = Math.min(f.min, f.fps);
+                            }
+                            f.n = 0; f.t0 = now;
+                        }
+                        requestAnimationFrame(tick);
+                    })();
+                }
                 if (!window.__ldBadgeTimer) window.__ldBadgeTimer = setInterval(function () {
                     try {
                         var p = badgeScope.videoPlayer;
@@ -312,7 +378,14 @@ export class HOAST360 {
                         var r = xr && xr.renderer, cam = xr && xr.camera;
                         var v = (host && host.querySelector('video')) || document.querySelector('video');
                         var o = xr && xr.controls3d && xr.controls3d.orientation;
+                        var fp = window.__fpsProbe || { fps: '?', min: '?' };
                         badge.textContent = BUILD_TAG + ' · ld' + LIVE_DELAY_S + 's'
+                            + (badgeScope._betaPixelRatio ? ' · BETA' : '')
+                            + '\nfps   ' + fp.fps + ' (worst ' + (fp.min === 999 ? '-' : fp.min) + ')'
+                            + (fp.hid ? ' bg' + fp.hid : '')
+                            + '\ndpr   ' + (r && typeof r.getPixelRatio === 'function'
+                                    ? r.getPixelRatio() : '?')
+                                + ' / dev ' + (window.devicePixelRatio || '?')
                             + '\nelem  ' + (p ? p.currentWidth() + 'x' + p.currentHeight() : '?')
                             + '\nbuf   ' + (r && r.domElement ? r.domElement.width + 'x' + r.domElement.height : '?')
                             + '\naspect ' + (cam ? cam.aspect.toFixed(3) : '?')

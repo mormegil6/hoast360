@@ -132,7 +132,17 @@ export default class HOASTloader {
         this.hoaBuffer = this.context.createBuffer(nCh - 4, hoalength, srate);
         for (var i = 1; i < nChGroups; i++) {
             for (var j = 0; j < this.buffers[i].numberOfChannels; j++) {
-                this.hoaBuffer.getChannelData((i - 1) * 8 + j).set(this.buffers[i].getChannelData(0));
+                // getChannelData(j), not (0). Upstream (thomasdeppisch/hoast360
+                // 3d4a662, 2020-03-04) reads source channel 0 for every
+                // destination in the group, so each higher-order group is filled
+                // with copies of its FIRST channel's decoding filter instead of
+                // each channel's own. Measured 2026-08-15 at order 3: 10 of the
+                // 12 higher-order filter channels were wrong, and a 16-channel
+                // tone ladder rendered through the real decoder moved by up to
+                // 14.7 dB per channel once corrected. Only ambisonic channels 5
+                // and 13 were right, being the first of their groups; 1-4 come
+                // from the FOA buffer and were never affected.
+                this.hoaBuffer.getChannelData((i - 1) * 8 + j).set(this.buffers[i].getChannelData(j));
             }
         }
     }
