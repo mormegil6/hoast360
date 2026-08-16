@@ -48,7 +48,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf20';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf21';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -533,7 +533,14 @@ export class HOAST360 {
                 // all (or none) enabled -> dash.js ABR ("auto"); exactly one -> pin it
                 let auto = (on.length === 0 || on.length === qualityLevels.length);
                 mp.updateSettings({ streaming: { abr: { autoSwitchBitrate: { video: auto } } } });
-                if (!auto) mp.setQualityFor('video', on[on.length - 1], true);
+                if (!auto) {
+                    mp.setQualityFor('video', on[on.length - 1], true);
+                } else if (mp.getQualityFor) {
+                    // Back to adaptive. Re-report the current rendition even
+                    // though it has not changed, so the menu rebuilds and stops
+                    // showing Auto and the old rung ticked at the same time.
+                    reportSelection(mp.getQualityFor('video'), true);
+                }
             };
             let schedule = function () {
                 if (reconcileTimer) clearTimeout(reconcileTimer);
@@ -557,8 +564,39 @@ export class HOAST360 {
                     });
                 });
             };
-            mp.on('streamInitialized', populate);
+            // The OTHER half of the tech's contract, and the reason the quality
+            // menu used to misbehave here. videojs-contrib-quality-levels keeps
+            // the active rendition in selectedIndex_, and the menu plugin
+            // rebuilds itself on the list's 'change' event; VHS does this for
+            // HLS, so the plugin is correct there. Populating the list without
+            // ever reporting the selection left selectedIndex at -1 forever, so
+            // no rung matched, nothing was ticked at startup, and clicks never
+            // cleared the previous highlight because no rebuild was ever
+            // triggered. That is our omission, not the plugin's bug.
+            // force = report even when the index has not moved. Needed when the
+            // user picks Auto: adaptive mode resumes but dash.js often keeps the
+            // same rendition, so no qualityChangeRendered follows, no rebuild
+            // happens, and the menu is left showing both Auto (marked by the
+            // click) and the previously active rung.
+            let reportSelection = function (index, force) {
+                if (typeof index !== 'number' || index < 0) return;
+                if (qualityLevels.selectedIndex === index && !force) return;
+                qualityLevels.selectedIndex_ = index;
+                qualityLevels.trigger({ type: 'change', selectedIndex: index });
+            };
+            // dash.js reports the rendition it has actually rendered. Our rungs
+            // are added in getBitrateInfoListFor order, so list index and
+            // dash.js quality index line up.
+            mp.on('qualityChangeRendered', function (e) {
+                if (e && e.mediaType === 'video') reportSelection(e.newQuality);
+            });
+            mp.on('streamInitialized', function () {
+                populate();
+                // Whatever dash.js already chose, before any switch happens.
+                if (mp.getQualityFor) reportSelection(mp.getQualityFor('video'));
+            });
             populate();   // in case the stream is already initialized
+            if (mp.getQualityFor) reportSelection(mp.getQualityFor('video'));
         };
         attach();
         player.one('loadstart', attach);
