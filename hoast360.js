@@ -36,6 +36,7 @@ import HOASTBinDecoder from './dependencies/HoastBinauralDecoder.js';
 import HOASTRotator from './dependencies/HoastRotator.js';
 import SegmentAudioFeed from './dependencies/SegmentAudioFeed.js';
 import { isMobileTabletVRDevice } from './dependencies/UserAgentChecker.js';
+import { probeOpusSupport, CHROME_OPUS_HELP_URL } from './dependencies/OpusProbe.js';
 import './css/video-js.css';
 import './css/hoast360.css';
 
@@ -47,7 +48,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf19';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf20';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -198,13 +199,14 @@ export class HOAST360 {
 
         // create as many audio players as we need for max order
         this.audioElement = new Audio();
-        // playback runs through MSE (dash.js), so probe MSE opus support in the
-        // containers we actually stream (fMP4 from shaka-packager, webm demo media)
-        if (typeof MediaSource === 'undefined' ||
-            !(MediaSource.isTypeSupported('audio/mp4; codecs="opus"') ||
-              MediaSource.isTypeSupported('audio/webm; codecs="opus"'))) {
-            this.opusSupport = false;
-        }
+        // Real decode capability, not MediaSource.isTypeSupported(): WebKit has
+        // a long history of isTypeSupported answering true for WebM+Opus while
+        // actual decode still fails (see the comment in OpusProbe.js), so an
+        // advisory-only check lets some browsers through the gate only to fail
+        // deep inside DASH/MSE with no clean error. Started here, memoized, and
+        // awaited in initialize() so the probe overlaps with page load instead
+        // of adding to it.
+        this._opusProbe = probeOpusSupport();
 
         this.videoPlayer = videojs('hoast360-player', {
             html5: { nativeCaptions: false },
@@ -230,9 +232,34 @@ export class HOAST360 {
         });
     }
 
-    initialize(newMediaUrl, newIrUrl, newOrder) {
+    async initialize(newMediaUrl, newIrUrl, newOrder) {
+        const opus = await this._opusProbe;
+        this.opusSupport = opus.ok;
         if (!this.opusSupport) {
-            this.videoPlayer.error('Error: Your browser does not support the OPUS audio codec. Please use Firefox or Chrome-based browsers.');
+            // Two different failures need two different answers. A browser that
+            // cannot decode Opus at all is a dead end here; one that decodes
+            // stereo but not multichannel is almost certainly a fixable Chrome
+            // field trial, and telling that user "your browser does not support
+            // Opus" would be both wrong and useless, since their browser
+            // supports it right up until the channel count goes above 2.
+            if (opus.diagnosis === 'multichannel-only-failure') {
+                this.videoPlayer.error(
+                    'Error: This browser decodes stereo Opus but fails on multichannel, which this '
+                    + 'player needs. On Chrome this is the DirectOpusAudioDecoding experiment: quit '
+                    + 'Chrome and relaunch it with --disable-features=DirectOpusAudioDecoding, or use '
+                    + 'Firefox or Brave. Details: ' + CHROME_OPUS_HELP_URL);
+                // The message is rendered as plain text by video.js, so repeat
+                // it where a link is clickable and the detail can be longer.
+                console.error(
+                    'Multichannel Opus decode failed while stereo Opus decoded successfully.\n'
+                    + 'Known cause on Chrome: the DirectOpusAudioDecoding field trial, which is\n'
+                    + 'server-delivered, does not appear in chrome://flags, and is NOT cleared by\n'
+                    + 'incognito, a guest profile, or restarting the browser.\n'
+                    + 'Workaround: relaunch Chrome with --disable-features=DirectOpusAudioDecoding\n'
+                    + 'Background and evidence: ' + CHROME_OPUS_HELP_URL);
+            } else {
+                this.videoPlayer.error('Error: Your browser does not support the OPUS audio codec. Please use Firefox or Chrome-based browsers.');
+            }
             return;
         }
 
