@@ -48,7 +48,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf21';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf22';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -294,7 +294,7 @@ export class HOAST360 {
             && this.mediaUrl.includes('.mpd')
             && !qp.has('legacyaudio');
 
-        // ?beta - RENDER AT THE DISPLAY'S REAL PIXEL RATIO.
+        // RENDER AT THE DISPLAY'S REAL PIXEL RATIO. Default since 2026-08-17.
         //
         // videojs-xr constructs THREE.WebGLRenderer with a devicePixelRatio
         // option, which is NOT a WebGLRenderer option: three.js reads the ratio
@@ -311,17 +311,25 @@ export class HOAST360 {
         // is nothing further to recover, so this saturates rather than
         // improving without limit.
         //
-        // GATED, not default: DPR 2 quadruples fragment work and this player
-        // already runs a 16-convolver ambisonic graph beside it. Opt-in until
-        // the Quest and the Mac Mini have been measured.
+        // Was gated behind ?beta until the two devices that mattered were
+        // measured. Quest 3, 2026-08-16, controlled A/B against the same build
+        // with DPR off: worst 81 fps -> 82 fps, sustained 90 fps -> 90 fps.
+        // Sustained framerate is IDENTICAL; DPR costs nothing measurable
+        // against the 16-convolver ambisonic graph running beside it. The Mac
+        // Mini never got its half of the measurement and now cannot: it has
+        // been repurposed to a headless Ubuntu server with no browser at all,
+        // so it drops out of this decision rather than having passed it.
+        // ?legacydpr forces the old DPR-1 rendering, same escape-hatch pattern
+        // as ?legacyaudio above, kept for A/B measurement on any future device
+        // this has not been checked on.
         // The flag only. An earlier version of this called setPixelRatio here
         // and it did NOTHING: videojs-xr creates the renderer later, so
         // videoPlayer.xr().renderer is still undefined at this point and the
         // call went into a catch. That is the very bug being fixed - a
         // pixel-ratio call that looks right and has no effect - so the real
         // work happens where the renderer is constructed, in the xr plugin.
-        this._betaPixelRatio = qp.has('beta');
-        window.__hoastBetaDPR = this._betaPixelRatio;
+        this._dprCorrectRendering = !qp.has('legacydpr');
+        window.__hoastDprCorrect = this._dprCorrectRendering;
 
         // Debug badge so a screen recording self-documents which build it is:
         // an A/V-sync experiment is worthless if you cannot tell which liveDelay
@@ -332,7 +340,7 @@ export class HOAST360 {
             // sphere is black or warped (element size vs drawing-buffer size vs
             // camera aspect vs whether the video is actually playing). Hidden for
             // visitors.
-            if (qp.has('dbg') || qp.has('beta')) {
+            if (qp.has('dbg')) {
                 var badge = document.getElementById('ld-badge') || document.createElement('div');
                 badge.id = 'ld-badge';
                 badge.style.cssText = 'position:absolute;top:8px;left:8px;z-index:9999;white-space:pre;'
@@ -407,7 +415,7 @@ export class HOAST360 {
                         var o = xr && xr.controls3d && xr.controls3d.orientation;
                         var fp = window.__fpsProbe || { fps: '?', min: '?' };
                         badge.textContent = BUILD_TAG + ' · ld' + LIVE_DELAY_S + 's'
-                            + (badgeScope._betaPixelRatio ? ' · BETA' : '')
+                            + (badgeScope._dprCorrectRendering ? '' : ' · LEGACYDPR')
                             + '\nfps   ' + fp.fps + ' (worst ' + (fp.min === 999 ? '-' : fp.min) + ')'
                             + (fp.hid ? ' bg' + fp.hid : '')
                             + '\ndpr   ' + (r && typeof r.getPixelRatio === 'function'

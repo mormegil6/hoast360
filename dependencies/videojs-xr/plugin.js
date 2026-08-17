@@ -260,17 +260,19 @@ class Xr extends Plugin {
             antialias: true
         });
 
-        // ?beta (window.__hoastBetaDPR, set by hoast360.js): render at the
-        // display's real pixel ratio. The devicePixelRatio key passed to the
-        // WebGLRenderer constructor above is NOT a renderer option - three.js
-        // reads the ratio only through setPixelRatio - so without this the
-        // canvas is allocated at CSS size and the browser upscales it, which
-        // on a 2x display softens the image by 2x in each direction.
+        // window.__hoastDprCorrect (set by hoast360.js, default on since
+        // 2026-08-17, ?legacydpr forces it off): render at the display's real
+        // pixel ratio. The devicePixelRatio key passed to the WebGLRenderer
+        // constructor above is NOT a renderer option - three.js reads the
+        // ratio only through setPixelRatio - so without this the canvas is
+        // allocated at CSS size and the browser upscales it, which on a 2x
+        // display softens the image by 2x in each direction.
         // Applied HERE because the renderer does not exist earlier: a first
         // attempt to do it from hoast360.js silently did nothing.
-        // Gated: DPR 2 quadruples fragment work, and a 16-convolver ambisonic
-        // graph runs alongside. Measured before it becomes default.
-        if (window.__hoastBetaDPR) {
+        // Was gated pending measurement: Quest 3 (2026-08-16, controlled A/B)
+        // showed no measurable framerate cost against the 16-convolver
+        // ambisonic graph running alongside (90 fps sustained either way).
+        if (window.__hoastDprCorrect) {
             this.renderer.setPixelRatio(window.devicePixelRatio || 1);
         }
         this.renderer.setSize(this.player.currentWidth(), this.player.currentHeight());
