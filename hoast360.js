@@ -48,10 +48,18 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf22';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf23';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
+
+// STALL WATCHDOG: how long playback may go without progress (while playing
+// and the tab is visible) before the session is treated as dead and
+// reloaded. See the watchdog itself, wired up in the constructor, for why
+// this can't just react to dash.js's own PLAYBACK_STALLED/BUFFER_EMPTY
+// events - those fire for ordinary, self-recovering rebuffering too.
+const STALL_RELOAD_MS = 60000;
+const STALL_CHECK_INTERVAL_MS = 15000;
 
 // Chromium delays any Web Audio tap on an MSE-fed element by ~2 s (measured:
 // invariant under liveDelay, dash.js buffer targets, captureStream, and
@@ -230,6 +238,41 @@ export class HOAST360 {
             if (scope.videoPlayer.usingPlugin('xr'))
                 scope.videoPlayer.xr().enableOrientation();
         });
+
+        // dash.js's own manifest-refresh timer runs on a schedule
+        // independent of buffer/decode health, so a session whose actual
+        // segment fetching has silently died - a decode error, a
+        // SourceBuffer append failure, a backgrounded tab whose media
+        // pipeline the browser suspended - keeps refreshing the live
+        // manifest forever with no visible symptom: the page looks alive,
+        // nothing plays, and neither this player nor dash.js itself
+        // surfaces or recovers from that state on its own. Confirmed live
+        // 2026-08-19: a real viewer's segment requests (chunk-stream0
+        // .m4s/chunk-stream1 .webm) stopped outright while manifest polling
+        // continued unchanged for 2h23m+, indistinguishable server-side
+        // from an active viewer. Watching actual playback progress
+        // (currentTime advancing) is the only signal that distinguishes
+        // that from ordinary, self-recovering rebuffering, which is why
+        // this watches timeupdate rather than dash.js's own
+        // PLAYBACK_STALLED/BUFFER_EMPTY events - those fire, and clear,
+        // constantly under normal network jitter.
+        this._lastProgressAt = Date.now();
+        this.videoPlayer.on('timeupdate', function () {
+            scope._lastProgressAt = Date.now();
+        });
+        setInterval(function () {
+            // A hidden tab is expected to stall - browsers throttle or
+            // suspend background media decode on purpose, and reloading
+            // behind the user's back would fight that rather than help.
+            // The watchdog simply picks back up once the tab is visible.
+            if (document.hidden) return;
+            if (scope.videoPlayer.paused()) return;
+            if (Date.now() - scope._lastProgressAt > STALL_RELOAD_MS) {
+                console.warn('HOAST360: no playback progress for ' + STALL_RELOAD_MS
+                    + 'ms while playing and visible - reloading to recover');
+                window.location.reload();
+            }
+        }, STALL_CHECK_INTERVAL_MS);
     }
 
     async initialize(newMediaUrl, newIrUrl, newOrder) {
