@@ -288,14 +288,16 @@ export class HOAST360 {
             if (opus.diagnosis === 'multichannel-only-failure') {
                 this.videoPlayer.error(
                     'Error: This browser decodes stereo Opus but fails on multichannel, which this '
-                    + 'player needs. On Chrome this is the DirectOpusAudioDecoding experiment: quit '
-                    + 'Chrome and relaunch it with --disable-features=DirectOpusAudioDecoding, or use '
-                    + 'Firefox or Brave. Details: ' + CHROME_OPUS_HELP_URL);
+                    + 'player needs. Firefox or Brave will work. If you are on recent Chrome there is '
+                    + 'a one-flag fix, with the exact command for each OS: ' + CHROME_OPUS_HELP_URL);
                 // The message is rendered as plain text by video.js, so repeat
                 // it where a link is clickable and the detail can be longer.
                 console.error(
                     'Multichannel Opus decode failed while stereo Opus decoded successfully.\n'
-                    + 'Known cause on Chrome: the DirectOpusAudioDecoding field trial, which is\n'
+                    + 'Check chrome://version before concluding a cause: the field trial below\n'
+                    + 'exists only in recent Chrome, so on an older embedded Chromium the cause\n'
+                    + 'is a decoder that never supported multichannel Opus, not this trial.\n'
+                    + 'Known cause on recent Chrome: the DirectOpusAudioDecoding field trial, which is\n'
                     + 'server-delivered, does not appear in chrome://flags, and is NOT cleared by\n'
                     + 'incognito, a guest profile, or restarting the browser.\n'
                     + 'Workaround: relaunch Chrome with --disable-features=DirectOpusAudioDecoding\n'
