@@ -23,6 +23,7 @@
  */
 
 import * as dashjs from 'dashjs';
+import { WasmOpusBackend } from './dependencies/WasmOpusBackend.js';
 import videojs from 'video.js';
 import 'videojs-contrib-dash'
 import 'videojs-http-source-selector';
@@ -48,7 +49,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf23';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf29';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -141,7 +142,13 @@ function attachDvrSeekClamp(player) {
             var mime = /mimeType="(audio|video)/.exec(blk);
             var ts = /timescale="(\d+)"/.exec(blk);
             var s = /<S t="(\d+)"/.exec(blk);              // first S carries the window start
-            if (mime && ts && s) starts[mime[1]] = parseInt(s[1], 10) / parseInt(ts[1], 10);
+            if (!mime || !ts || !s) return;
+            var t0 = parseInt(s[1], 10) / parseInt(ts[1], 10);
+            // Two audio AdaptationSets since the keep-alive track, and the
+            // engines do not select the same one (WebKit takes the AAC set,
+            // Chromium the Opus set). Clamp to the LATER start, which is inside
+            // both DVR windows; last-one-parsed would depend on muxer order.
+            if (!(mime[1] in starts) || t0 > starts[mime[1]]) starts[mime[1]] = t0;
         });
         if (!('audio' in starts) || !('video' in starts)) return null;
         return starts.audio - starts.video;
@@ -171,6 +178,10 @@ function attachDvrSeekClamp(player) {
     });
 }
 
+/* global __HOAST_BUILD__ */
+const HOAST_BUILD = typeof __HOAST_BUILD__ !== 'undefined' ? __HOAST_BUILD__ : 'dev';
+if (typeof window !== 'undefined') window.HOAST360_BUILD = HOAST_BUILD;
+
 export class HOAST360 {
     constructor() {
         this.order = 0;
@@ -194,8 +205,16 @@ export class HOAST360 {
         this.zoomIndex = 1;
         this.zoomEnabled = true;
 
+        console.log('HOAST360 build ' + HOAST_BUILD);
         var AudioContext = window.AudioContext || window.webkitAudioContext;
-        this.context = new AudioContext;
+        // At the stream's 48 kHz, explicitly. On a 44.1 kHz output device the
+        // context otherwise comes up at 44.1, every scheduled AudioBufferSource
+        // resamples its 48 kHz buffer INDEPENDENTLY, and resampler state does
+        // not carry across node boundaries - which clicks at every segment
+        // junction on the WASM feed (heard on Safari, 2026-08-25). One
+        // context-level resample to the device is continuous and silent.
+        try { this.context = new AudioContext({ sampleRate: 48000 }); }
+        catch (e) { this.context = new AudioContext(); }
         console.log(this.context);
 
         if (isMobileTabletVRDevice()) {
@@ -278,7 +297,25 @@ export class HOAST360 {
     async initialize(newMediaUrl, newIrUrl, newOrder) {
         const opus = await this._opusProbe;
         this.opusSupport = opus.ok;
-        if (!this.opusSupport) {
+        // The probe judges the PLATFORM decoder, but on the WASM feed the
+        // platform never decodes Opus: video is avc1 through MSE and audio is
+        // libopus-in-WASM. Safari fails the multichannel probe by design
+        // (docs/IOS-SAFARI.md) and must not be bounced to "use Chrome" for a
+        // codec path this player no longer needs there.
+        const qpEarly = new URLSearchParams(window.location.search);
+        let mseOpusEarly = false;
+        try {
+            const MSE = window.MediaSource || window.ManagedMediaSource;
+            mseOpusEarly = !!MSE && MSE.isTypeSupported('audio/mp4; codecs="opus"');
+        } catch (e) { /* absent */ }
+        const wasmFeedPlanned = String(newMediaUrl).includes('.mpd')
+            && !qpEarly.has('legacyaudio')
+            && (qpEarly.has('wasmaudio') || (!IS_CHROMIUM && !mseOpusEarly));
+        if (!this.opusSupport && wasmFeedPlanned) {
+            console.log('HOAST360: native Opus probe failed (' + (opus.diagnosis || 'no decode')
+                + '), continuing on the WASM audio feed, which does not use the platform decoder');
+        }
+        if (!this.opusSupport && !wasmFeedPlanned) {
             // Two different failures need two different answers. A browser that
             // cannot decode Opus at all is a dead end here; one that decodes
             // stereo but not multichannel is almost certainly a fixable Chrome
@@ -335,9 +372,22 @@ export class HOAST360 {
         // no dropouts, and the degrade path covers weaker devices. ?legacyaudio
         // still forces the old element-audio wiring anywhere.
         const qp = new URLSearchParams(window.location.search);
-        this._useSegmentFeed = IS_CHROMIUM
-            && this.mediaUrl.includes('.mpd')
-            && !qp.has('legacyaudio');
+        // Safari (macOS and iOS alike) cannot decode multichannel Opus through
+        // ANY native route - decodeAudioData, WebCodecs, MSE - measured in
+        // docs/IOS-SAFARI.md. Its MSE/ManagedMediaSource also refuses the
+        // audio/mp4 opus type outright, so dash.js will drop the audio
+        // AdaptationSet there on its own and drive video only. The feed then
+        // carries the audio, decoding through libopus-in-WASM instead of
+        // decodeAudioData. Probed by capability, not user agent, so any other
+        // browser with the same gap gets the same treatment; ?wasmaudio forces
+        // the WASM backend anywhere for A/B measurement.
+        const MS = window.MediaSource || window.ManagedMediaSource;
+        let mseOpus = false;
+        try { mseOpus = !!MS && MS.isTypeSupported('audio/mp4; codecs="opus"'); } catch (e) { /* absent */ }
+        this._feedBackend = (qp.has('wasmaudio') || (!IS_CHROMIUM && !mseOpus)) ? 'wasm' : 'native';
+        this._useSegmentFeed = this.mediaUrl.includes('.mpd')
+            && !qp.has('legacyaudio')
+            && (IS_CHROMIUM || this._feedBackend === 'wasm');
 
         // RENDER AT THE DISPLAY'S REAL PIXEL RATIO. Default since 2026-08-17.
         //
@@ -508,10 +558,43 @@ export class HOAST360 {
                 }
             } else {
                 let scope2 = this;
+                // KEEP-ALIVE. WebKit suspends a backgrounded <video> unless it
+                // has a decodable audio track AND is unmuted - measured three
+                // times over: muted-with-no-track and unmuted-with-no-track both
+                // froze the instant the page hid, while unmuted-with-a-silent-
+                // track kept decoding. Our audio is slaved to the element clock,
+                // so a suspended element silences the feed within ~2 s of the
+                // operator switching Spaces.
+                // Unmuting is safe on the WASM path specifically: Safari's
+                // CapabilitiesFilter always drops the 16-channel Opus set, so
+                // the element carries either the silent stereo AAC keep-alive
+                // track or no audio track at all. Both are silent. On Chromium
+                // the Opus set IS decodable and unmuting would double the audio,
+                // so the mute pin stands there.
+                // ?keepalive=0 opts out. Headless WebKit refuses unmuted
+                // playback outright (it has no real output device), so a harness
+                // that leaves this on measures a paused element rather than the
+                // pipeline it meant to test. The keep-alive is verified in real
+                // Safari by hand; harnesses turn it off and test everything else.
+                let keepAlive = scope2._feedBackend === 'wasm'
+                    && new URLSearchParams(window.location.search).get('keepalive') !== '0';
+                // GATED ON A REAL GESTURE. WebKit pauses an unmuted element that
+                // began playing without one, so unmuting unconditionally breaks
+                // muted autoplay outright - it stopped playback dead in every
+                // headless harness. A user pressing play is a gesture, so the
+                // keep-alive still applies exactly when a person is watching;
+                // an autoplaying muted page keeps working and simply forgoes it.
+                let sawGesture = false;
+                ['pointerdown', 'keydown', 'touchstart'].forEach(function (ev) {
+                    document.addEventListener(ev, function () { sawGesture = true; },
+                        { capture: true, passive: true });
+                });
                 let pin = function () {
                     try {
                         let el = scope2.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el();
-                        if (el && !el.muted) el.muted = true;
+                        if (!el) return;
+                        if (keepAlive && sawGesture) { if (el.muted) el.muted = false; }
+                        else if (!el.muted) el.muted = true;
                     } catch (e) { /* tech not ready yet */ }
                 };
                 pin();
@@ -529,13 +612,23 @@ export class HOAST360 {
                         if (m === undefined) return scope2._uiMuted;
                         scope2._uiMuted = !!m;
                         if (scope2.masterGain && scope2.masterGain.gain)
-                            scope2.masterGain.gain.value = scope2._uiMuted ? 0 : scope2.videoPlayer.volume();
+                            scope2._setMasterGain(scope2._uiMuted ? 0 : scope2.videoPlayer.volume());
                         scope2.videoPlayer.trigger('volumechange');
                         return scope2.videoPlayer;
                     };
                 }
             }
 
+            // iOS Safari has no MediaSource, only ManagedMediaSource, and WebKit
+            // only activates MMS when remote playback is disabled (or an AirPlay
+            // source alternative exists) - without this, sourceopen never fires
+            // and playback silently never starts. Harmless everywhere else.
+            if (!window.MediaSource && window.ManagedMediaSource) {
+                try {
+                    const vel = this.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el();
+                    if (vel) vel.disableRemotePlayback = true;
+                } catch (e) { /* tech not ready; dash.js will surface the failure */ }
+            }
             this.videoPlayer.src({ type: 'application/dash+xml', src: this.mediaUrl });
             this._wireQualityLevels();
             this.audioPlayer = null;
@@ -708,6 +801,9 @@ export class HOAST360 {
             let scope = this;
             this.audioFeed = new SegmentAudioFeed({
                 context: this.context,
+                decodeBackend: this._feedBackend === 'wasm' ? new WasmOpusBackend() : null,
+                selfFetchAudio: this._feedBackend === 'wasm',
+                renderReady: !!this._irsReady,
                 getElement: function () {
                     try { return scope.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el(); }
                     catch (e) { return document.querySelector('#hoast360-player video, .video-js video'); }
@@ -779,6 +875,15 @@ export class HOAST360 {
 
         var loader_filters = new HOASTloader(this.context, this.order, this.irs, (foaBuffer, hoaBuffer) => {
             this.decoder.updateFilters(foaBuffer, hoaBuffer);
+            // Until this fires, HoastBinauralDecoder runs resetFilters()'s
+            // cardioid placeholders: quiet, essentially non-spatial. On the
+            // element-audio path that window is short and masked by startup;
+            // on the WASM feed it lasted seconds and was heard as "a quiet
+            // tone that suddenly gets louder" (2026-08-25). Let the feed hold
+            // its audio until the real HRIRs are in, so the first thing heard
+            // is the actual render.
+            this._irsReady = true;
+            if (this.audioFeed) this.audioFeed.setRenderReady(true);
 
             if (this.audioPlayer)
                 this.playbackEventHandler.setAllBuffersLoaded(true);
@@ -787,6 +892,22 @@ export class HOAST360 {
 
         this.masterGain = this.context.createGain();
         this.masterGain.gain.value = 1.0;
+        // RAMPED, never assigned. Writing .gain.value steps the gain within a
+        // single sample, which is a click whenever audio is already flowing -
+        // audible at startup as a pop just before playback, because the UI-mute
+        // flag clears and the gain jumps 0 -> volume in one sample. 15 ms is
+        // short enough to feel instant on a slider and long enough to be
+        // inaudible as a transient.
+        this._setMasterGain = function (v) {
+            var g = scope.masterGain;
+            if (!g || !g.gain) return;
+            var t = scope.context.currentTime;
+            try {
+                g.gain.cancelScheduledValues(t);
+                g.gain.setValueAtTime(g.gain.value, t);
+                g.gain.linearRampToValueAtTime(v, t + 0.015);
+            } catch (e) { g.gain.value = v; }   // pre-Web-Audio-1.1 fallback
+        };
 
         this.videoPlayer.on("volumechange", function () {
             if (!scope.masterGain)
@@ -796,14 +917,14 @@ export class HOAST360 {
             // the player's muted() is rerouted to the UI-intent flag, which
             // together with the volume slider drives the feed audio level.
             if (scope._noCapture && scope._useSegmentFeed && !scope._feedDegraded) {
-                scope.masterGain.gain.value = scope._uiMuted ? 0 : this.volume();
+                scope._setMasterGain(scope._uiMuted ? 0 : this.volume());
                 return;
             }
 
             if (this.muted())
-                scope.masterGain.gain.value = 0;
+                scope._setMasterGain(0);
             else
-                scope.masterGain.gain.value = this.volume();
+                scope._setMasterGain(this.volume());
         });
 
         if (this._useSegmentFeed && this.audioFeed && this._feedN && !this._feedDegraded) {
