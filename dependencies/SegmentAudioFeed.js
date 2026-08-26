@@ -62,6 +62,29 @@ const STALL_FADE_S = 0.050;  // slower fade when the element stalls
 const PUMP_MS = 500;         // scheduler tick; also woken by events
 const START_LEAD_S = 0.08;   // scheduling lead when starting a run
 const JOIN_TOL_S = 0.030;    // chunk considered contiguous within this
+// crossfade span at junctions, in samples: pair-decode makes the overlapped
+// content of consecutive decodes identical, so a linear fade pair sums to 1.0
+// exactly and the join is immune to engine start()-time quantization (real
+// Safari rounds to 128-sample quanta; butt joints there tick every 2 s).
+const XF_SMP = 256;
+// live MPD refresh: reread when the horizon nears the snapshot's last known
+// segment, rate-limited so a stalled edge cannot spin
+const MPD_REFRESH_LEAD_S = 4;
+const MPD_REFRESH_MIN_MS = 5000;
+// run start: wait for this much decoded content before anchoring, so Safari's
+// busy first seconds do not underrun-resync audibly before settling
+// Cushion required before the first note sounds, and it is load-bearing.
+// Moving decode into a worker looked like it should have made this cheap, so it
+// was swept downward on 2026-08-26 to cut startup latency. It does not survive:
+//   1.2  resync on the first run, re-anchor at 0.79 s
+//   2.0  resync in 2 of 3 runs, same 0.79 s re-anchor
+//   2.5  resync in 2 of 3 runs
+//   3.5  clean across every run
+// The re-anchor lands around 0.8 s and is audible as a drop, which is a worse
+// artifact than the wait it buys back. Do not lower this without re-running
+// seam-check several times: a single clean run means nothing here, all three
+// lower values passed once before failing.
+const MIN_START_AHEAD_S = 3.5;    // chunk considered contiguous within this
 const WATCHDOG_S = 15;       // no audio fragments for this long: degrade
 const STRIKE_WINDOW_S = 60;  // decode-failure strikes counted in this window
 const STRIKE_LIMIT = 3;
@@ -94,6 +117,7 @@ export default class SegmentAudioFeed {
         this.N = 0;
         this.destroyed = false;
         this.degraded = false;
+        this.degradeReason = null;
         this.connectedTo = null;
 
         this.driftSamples = [];
@@ -105,7 +129,35 @@ export default class SegmentAudioFeed {
         this.sawAudioFrag = false;
         this.strikes = [];
         this.retried = new Set();
-        this.counters = { decodes: 0, decodeFails: 0, resyncs: 0, steps: 0, holes: 0, epochBumps: 0 };
+        this.counters = { decodes: 0, decodeFails: 0, resyncs: 0, steps: 0, holes: 0, epochBumps: 0,
+            xfades: 0, fadedJoins: 0 };
+        // media times of the first faded joins, for after-the-fact diagnosis
+        // of which junctions were not seamless. Bounded; diagnostics only.
+        this.fadedAt = [];
+
+        // Optional decode backend. Chromium's decodeAudioData handles 16-ch
+        // Opus-in-fMP4 natively; Safari's does not, and WasmOpusBackend decodes
+        // the identical bytes through libopus-in-WASM with the same contract
+        // (see that file). Null means the native path, unchanged.
+        this.decodeBackend = opts.decodeBackend || null;
+        // Self-fetch mode, for engines whose MSE refuses the audio type: dash.js
+        // then drops the audio AdaptationSet and never loads an audio byte, so
+        // there is nothing to tap. The feed instead fetches audio segments
+        // itself, keyed to the VIDEO fragments dash.js still loads: same muxer,
+        // same seg_duration, aligned numbering, so video segment N maps to
+        // audio segment N through the manifest's SegmentTemplates. Video
+        // startTime stands in for audio startTime; the tracks' presentation
+        // offsets differ only by the Opus pre-skip (~7 ms), inside the drift
+        // deadband, and junction chaining owns placement after the first chunk.
+        this.selfFetchAudio = !!opts.selfFetchAudio;
+        // The binaural decoder runs cardioid placeholder filters until its
+        // HRIRs load; audio scheduled before that is quiet and non-spatial,
+        // then jumps in level when the real filters arrive. Hold the anchor
+        // until the render is real. Decoding continues meanwhile, so the
+        // cushion is already built when audio does start.
+        this.renderReady = opts.renderReady !== false;
+        this._sf = null;              // { aInitUrl, aMedia(n)->url, vNumberRe, dN }
+        this._sfFetched = new Set();  // audio numbers fetched this epoch
 
         this.mp = null;
         this._onFrag = this._onFrag.bind(this);
@@ -118,10 +170,17 @@ export default class SegmentAudioFeed {
 
     // ---- public API --------------------------------------------------------
 
+    setRenderReady(v) {
+        if (this.renderReady === !!v) return;
+        this.renderReady = !!v;
+        if (this.renderReady) this._pump();
+    }
+
     attach(mediaPlayer) {
         if (this.destroyed || this.mp === mediaPlayer) return;
         this.detach();
         this.mp = mediaPlayer;
+        if (this.selfFetchAudio) this._selfFetchSetup(mediaPlayer);
         // string literal on purpose: the inlined dash.js instance may not be
         // the same module as any imported dashjs, so shared event constants
         // cannot be assumed
@@ -160,7 +219,11 @@ export default class SegmentAudioFeed {
             scheduled: this.nodes.length,
             drift: this._medianDrift(),
             scheduledAheadSec: this.nextCtx != null ? Math.max(0, this.nextCtx - this.ctx.currentTime) : 0,
-            degraded: this.degraded, counters: this.counters,
+            degraded: this.degraded,
+            degradeReason: this.degradeReason,
+            renderReady: this.renderReady,
+            seams: this._seamLog || [], counters: this.counters,
+            fadedAt: this.fadedAt,
             // axis corroboration: the ring's media span should bracket elT
             elT: el ? Math.round(el.currentTime * 100) / 100 : null,
             ringT0: this.ring.length ? Math.round(this.ring[0].t) : null,
@@ -245,6 +308,7 @@ export default class SegmentAudioFeed {
         this._flush(0);
         try { this.feedBus.disconnect(); } catch (e) { /* already detached */ }
         this.ring = []; this.decoded.clear(); this.inits.clear(); this.inflight.clear();
+        this._sfFetched.clear(); if (this._sfRetry) { clearTimeout(this._sfRetry); this._sfRetry = null; }
     }
 
     // ---- element coupling (read-only master clock) -------------------------
@@ -296,6 +360,14 @@ export default class SegmentAudioFeed {
     _resume() {
         const el = this.getElement();
         if (!el || el.paused || this.destroyed || this.degraded) return;
+        // IDEMPOTENT. Both 'play' and 'playing' land here, and at startup they
+        // fire ~0.7 s apart: without this guard the second one tore down the
+        // chain the first had just built and re-anchored it, an audible drop
+        // inside the first second on every engine. A chain that is already
+        // running against a live anchor needs nothing. Every path that does
+        // want a rebuild ('seeking', 'waiting', 'pause') leaves the state
+        // stalled or paused first, so this cannot swallow one of those.
+        if (this.state === 'running' && this.anchor && this.nodes.length) return;
         // fresh anchor: drift is definitionally zero after a rebuild, so the
         // post-stall rule (never bridge stall residue with steps) holds
         this._flush(0);
@@ -305,6 +377,256 @@ export default class SegmentAudioFeed {
     }
 
     // ---- dash.js tap -------------------------------------------------------
+
+    // ---- self-fetched audio (MSE-refused engines) --------------------------
+
+    _selfFetchSetup(mediaPlayer) {
+        const self = this;
+        let mpdUrl = null;
+        try { mpdUrl = mediaPlayer.getSource(); } catch (e) { /* not ready */ }
+        if (!mpdUrl || typeof mpdUrl !== 'string') { this._sfRetry = setTimeout(function () { self._selfFetchSetup(mediaPlayer); }, 500); return; }
+        // dash.js hands back whatever it was given, which may be a bare path;
+        // template resolution below needs an absolute base
+        try { mpdUrl = new URL(mpdUrl, document.baseURI).href; } catch (e) { /* leave as-is; the fetch will say */ }
+        fetch(mpdUrl, { cache: 'no-store' }).then(function (r) {
+            if (!r.ok) throw new Error('MPD HTTP ' + r.status);
+            return r.text();
+        }).then(function (xml) {
+            if (self.destroyed) return;
+            const doc = new DOMParser().parseFromString(xml, 'text/xml');
+            const sets = doc.querySelectorAll('AdaptationSet');
+            const audioSets = [];
+            let v = null;
+            sets.forEach(function (as) {
+                const rep0 = as.querySelector('Representation');
+                const ct = (as.getAttribute('contentType') || '')
+                    || ((as.getAttribute('mimeType') || (rep0 || as).getAttribute('mimeType') || '').split('/')[0]);
+                if (ct === 'audio') audioSets.push(as);
+                if (ct === 'video' && !v) v = as;
+            });
+            // MORE THAN ONE AUDIO SET since the WebKit keep-alive track (silent
+            // stereo AAC, there only to stop a backgrounded element being
+            // suspended). Taking the first audio set worked purely because the
+            // keep-alive happens to be appended last - nothing here controls
+            // muxer order. Select by CODEC instead: this feed decodes through
+            // libopus, so "is it Opus" is exactly the question that decides
+            // whether the bytes are playable at all. Channel count only breaks
+            // ties between Opus sets, so it stays correct at 4 (1OA), 16 (3OA)
+            // and 25 (4OA) rather than hardcoding one order.
+            const codecOf = function (as) {
+                const rep = as.querySelector('Representation');
+                return (((rep && rep.getAttribute('codecs')) || as.getAttribute('codecs') || '')).toLowerCase();
+            };
+            const chOf = function (as) {
+                const acc = as.querySelector('AudioChannelConfiguration');
+                const n = acc ? parseInt(acc.getAttribute('value') || '', 10) : NaN;
+                return isFinite(n) ? n : -1;
+            };
+            let a = null;
+            audioSets.forEach(function (as) {
+                if (codecOf(as).indexOf('opus') < 0) return;
+                if (!a || chOf(as) > chOf(a)) a = as;
+            });
+            if (!a) audioSets.forEach(function (as) {   // no Opus set: widest audio set
+                if (!a || chOf(as) > chOf(a)) a = as;
+            });
+            if (!a || !v) throw new Error('MPD lacks an audio+video AdaptationSet pair');
+            if (audioSets.length > 1)
+                console.log('SegmentAudioFeed: ' + audioSets.length + ' audio sets, chose codecs="'
+                    + codecOf(a) + '" ' + chOf(a) + 'ch');
+            const tpl = function (as) {
+                const st = as.querySelector('SegmentTemplate');
+                if (!st) throw new Error('no SegmentTemplate (self-fetch supports the template shape this stack ships)');
+                const rep = as.querySelector('Representation');
+                const rid = rep ? (rep.getAttribute('id') || '0') : '0';
+                const ex = function (t, n) {
+                    t = t.split('$RepresentationID$').join(rid);
+                    t = t.replace(/\$Number(%0(\d+)d)?\$/, function (m, f, w) {
+                        let d = String(n); if (w) while (d.length < +w) d = '0' + d; return d;
+                    });
+                    return new URL(t, mpdUrl).href;
+                };
+                const ts = parseFloat(st.getAttribute('timescale') || '1');
+                const pto = parseFloat(st.getAttribute('presentationTimeOffset') || '0') / ts;
+                const startNum = parseInt(st.getAttribute('startNumber') || '1', 10);
+                // WALK THE REAL TIMELINE, never a modal duration. This stack's
+                // audio segments are NOT uniform: the box's own live manifest
+                // carries d=96464/96440 splice segments among runs of d=96000
+                // wherever the demo loop wraps. Grid arithmetic drops those
+                // ~9.5 ms each, which both misplaces content (~11 ms/min of
+                // audio-leads-video that the drift corrector cannot see, since
+                // it measures against the same grid) and makes the crossfade
+                // overlay non-identical content, blipping at every splice.
+                const segs = [];   // { n, t, d } in presentation seconds
+                const ss = st.querySelectorAll('SegmentTimeline > S');
+                if (ss.length) {
+                    let n = startNum, tTicks = null;
+                    for (let i = 0; i < ss.length; i++) {
+                        const S = ss[i];
+                        const tAttr = S.getAttribute('t');
+                        if (tAttr !== null) tTicks = parseFloat(tAttr);
+                        const d = parseFloat(S.getAttribute('d') || '0');
+                        const reps = parseInt(S.getAttribute('r') || '0', 10) + 1;
+                        for (let k = 0; k < reps; k++) {
+                            if (tTicks === null) tTicks = 0;
+                            segs.push({ n: n++, t: tTicks / ts - pto, d: d / ts });
+                            tTicks += d;
+                        }
+                    }
+                }
+                const fixed = st.getAttribute('duration')
+                    ? parseFloat(st.getAttribute('duration')) / ts : null;
+                return { init: ex(st.getAttribute('initialization') || '', 0),
+                         media: function (n) { return ex(st.getAttribute('media') || '', n); },
+                         start: startNum, segs: segs, fixed: fixed,
+                         // @duration manifests have no timeline to walk; the
+                         // grid IS the truth there, so it stays the fallback
+                         segDur: fixed || (segs.length ? segs[0].d : null),
+                         p0: segs.length ? segs[0].t : 0, pto: pto,
+                         mediaTpl: st.getAttribute('media') || '', rid: rid };
+            };
+            const A = tpl(a), V = tpl(v);
+            // regex that recovers N from a completed video fragment URL
+            const esc = V.mediaTpl.split('$RepresentationID$').join(V.rid)
+                .replace(/[.*+?^{}()|[\]\\]/g, '\\$&')
+                .replace(/\\\$Number(%0\d+d)?\\\$/, '(\\d+)');
+            self._sfFails = 0;
+            const prevSf = self._sf;
+            const next = { aInitUrl: A.init, aMedia: A.media, aStart: A.start,
+                           segs: A.segs, segDur: A.segDur || V.segDur, p0: A.p0,
+                           vNumberRe: new RegExp(esc + '$'), dN: A.start - V.start,
+                           at: performance.now() };
+            // A REBASED TIMELINE IS A DISCONTINUITY, whatever the init bytes
+            // say. ffmpeg regenerates byte-identical audio inits across
+            // restarts for an unchanged encoder config, so the init-compare
+            // epoch bump never fires here; without this, the new run's segment
+            // numbers collide with the old run's dedup keys and are skipped
+            // silently until the numbering passes the old high-water mark -
+            // minutes of total silence after a restart.
+            if (prevSf && (prevSf.aStart !== next.aStart
+                           || Math.abs((prevSf.p0 || 0) - (next.p0 || 0)) > 0.5)) {
+                self.epoch++;
+                self.counters.epochBumps++;
+                self._sfFetched.clear();
+            }
+            self._sf = next;
+            self._sfFetchInit();
+        }).catch(function (e) {
+            if (self.destroyed) return;
+            const msg = (e && e.message) || String(e);
+            // Structural manifest problems are permanent; a lost request is
+            // not. Degrading on the first network miss cost the whole session,
+            // and on Safari the element-audio path degraded TO is silent
+            // (dash.js dropped the audio set), so this must retry like every
+            // other fetch in this file does.
+            const structural = /AdaptationSet|SegmentTemplate/.test(msg);
+            self._sfFails = (self._sfFails || 0) + 1;
+            if (structural || self._sfFails > 8) {
+                self._degrade('self-fetch setup: ' + msg);
+                return;
+            }
+            const backoff = Math.min(5000, 500 * Math.pow(2, self._sfFails - 1));
+            if (self._sfRetry) clearTimeout(self._sfRetry);
+            self._sfRetry = setTimeout(function () {
+                self._sfRetry = null;
+                if (!self.destroyed && self.mp) self._selfFetchSetup(self.mp);
+            }, backoff);
+        });
+    }
+
+    _sfFetchInit() {
+        const self = this;
+        fetch(this._sf.aInitUrl, { cache: 'no-store' }).then(function (r) {
+            if (!r.ok) throw new Error('audio init HTTP ' + r.status);
+            return r.arrayBuffer();
+        }).then(function (ab) {
+            if (self.destroyed) return;
+            self._sfInitFails = 0;
+            self._onFrag({ request: { mediaType: 'audio', type: 'InitializationSegment', selfFetched: true,
+                                      representationId: '0' }, response: ab });
+        }).catch(function (e) {
+            if (self.destroyed) return;
+            // the init URL is permanent: a miss is transient by definition
+            self._sfInitFails = (self._sfInitFails || 0) + 1;
+            if (self._sfInitFails > 8) {
+                self._degrade('audio init fetch: ' + ((e && e.message) || e));
+                return;
+            }
+            const backoff = Math.min(5000, 500 * Math.pow(2, self._sfInitFails - 1));
+            setTimeout(function () { if (!self.destroyed) self._sfFetchInit(); }, backoff);
+        });
+    }
+
+    _sfEnsure(elT) {
+        const sf = this._sf;
+        if (sf.segs && sf.segs.length) {
+            // real timeline: exact t and d per segment, no grid to drift off
+            for (let i = 0; i < sf.segs.length; i++) {
+                const g = sf.segs[i];
+                if (g.t + g.d < elT - 0.5) continue;
+                if (g.t > elT + HORIZON_S) break;
+                this._sfFetch(g.n, g.t, g.d);
+            }
+            // live: the snapshot's timeline ends at the edge it was fetched
+            // at, so refresh once the horizon reaches the last known segment
+            const last = sf.segs[sf.segs.length - 1];
+            if (elT + HORIZON_S > last.t + last.d - MPD_REFRESH_LEAD_S
+                && performance.now() - (sf.at || 0) > MPD_REFRESH_MIN_MS
+                && this.mp && !this._sfRefreshing) {
+                this._sfRefreshing = true;
+                const self = this;
+                setTimeout(function () { self._sfRefreshing = false; self._selfFetchSetup(self.mp); }, 0);
+            }
+            return;
+        }
+        // @duration manifests carry no timeline; the grid is the truth there
+        const rel = elT - sf.p0;
+        const n0 = Math.max(sf.aStart, sf.aStart + Math.floor((rel - 0.5) / sf.segDur));
+        const n1 = sf.aStart + Math.floor((rel + HORIZON_S) / sf.segDur);
+        for (let n = n0; n <= n1; n++)
+            this._sfFetch(n, sf.p0 + (n - sf.aStart) * sf.segDur, sf.segDur);
+    }
+
+    _sfOnVideoFrag(r) {
+        if (!this._sf || !r.url) return;
+        const m = String(r.url).match(this._sf.vNumberRe);
+        if (!m) return;
+        const n = parseInt(m[1], 10) + this._sf.dN;
+        this._sfFetch(n, r.startTime, r.duration);
+    }
+
+    _sfFetch(n, t, dur) {
+        const key = this.epoch + ':' + n;
+        const epochAtStart = this.epoch;
+        if (this._sfFetched.has(key)) return;
+        this._sfFetched.add(key);
+        if (this._sfFetched.size > 512) {           // bounded: oldest half dropped
+            const keep = Array.from(this._sfFetched).slice(-256);
+            this._sfFetched = new Set(keep);
+        }
+        const self = this;
+        fetch(this._sf.aMedia(n), { cache: 'no-store' }).then(function (resp) {
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            return resp.arrayBuffer();
+        }).then(function (ab) {
+            if (self.destroyed) return;
+            // a rebase landed while this was in flight: these bytes belong to
+            // the old timeline and must not enter the new epoch's ring
+            if (epochAtStart !== self.epoch) return;
+            self._onFrag({ request: { mediaType: 'audio', type: 'MediaSegment', selfFetched: true,
+                                      representationId: '0', startTime: t, duration: dur },
+                           response: ab });
+        }).catch(function (err) {
+            const el = self.getElement();
+            const behind = el && t + (dur || 0) < el.currentTime;
+            const is404 = /HTTP 404/.test(String(err && err.message || err));
+            // expired live segments never come back: keep the key so the sweep
+            // stops asking. Anything else (not-yet-available at the live edge,
+            // a transient network miss) retries on the next sweep; repeated
+            // misses starve the ring and the stall accounting degrades the feed.
+            if (!(is404 && behind)) self._sfFetched.delete(key);
+        });
+    }
 
     _onFrag(e) {
         if (this.destroyed || this.degraded) return;
@@ -317,16 +639,34 @@ export default class SegmentAudioFeed {
         // MSE ignores edit lists, so Chromium paints video EARLY by exactly
         // the edit's net delay. Audio must be placed that much earlier to
         // match what Chromium actually displays.
+        if (this.selfFetchAudio && (r.mediaType || '') === 'video' && r.type === 'MediaSegment') {
+            this._sfOnVideoFrag(r);
+            // fall through: video media frags carry nothing else the feed wants
+        }
         if ((r.mediaType || '') === 'video' && r.type === 'InitializationSegment') {
+            if (this.selfFetchAudio && this._sf && this.mp) {
+                // encoder restart rebases the timeline: re-read MPD and init
+                this._sf = null;
+                this._selfFetchSetup(this.mp);
+            }
             const shift = this._parseElstShiftS(new Uint8Array(e.response));
             if (shift != null && Math.abs(shift - this.presentationShiftS) > 0.001) {
                 this.presentationShiftS = shift;
-                if (this.anchor !== null) this._hardResync();
+                if (this.anchor !== null) this._hardResync('elst-shift');
             }
             return;
         }
 
         if ((r.mediaType || '') !== 'audio') return;
+        // NOT OUR AUDIO. In self-fetch mode the feed downloads the 16-channel
+        // Opus segments itself, so any audio fragment dash.js loads belongs to
+        // a different AdaptationSet - specifically the silent stereo AAC
+        // keep-alive track that stops WebKit suspending a backgrounded video
+        // element. Before this guard those AAC bytes were handed to libopus and
+        // came back as OPUS_INVALID_PACKET, 43 decode failures in 12 s and
+        // silence, the moment a second audio set appeared in the manifest.
+        // (the feed re-enters here with selfFetched:true to reuse this path)
+        if (this.selfFetchAudio && !r.selfFetched) return;
         const rep = String(r.representationId != null ? r.representationId : '0');
 
         if (r.type === 'InitializationSegment') {
@@ -444,24 +784,36 @@ export default class SegmentAudioFeed {
             if (Math.abs((c.t + c.dur) - entry.t) < 0.060) prev = c;
             break;
         }
-        const parts = prev ? [init.bytes, prev.bytes, entry.bytes] : [init.bytes, entry.bytes];
-        let len = 0; parts.forEach(function (p) { len += p.byteLength; });
-        const buf = new Uint8Array(len);
-        let o = 0; parts.forEach(function (p) { buf.set(p, o); o += p.byteLength; });
-
         this.inflight.add(key);
         const self = this;
-        this.ctx.decodeAudioData(buf.buffer).then(function (ab) {
+        let decoded;
+        if (this.decodeBackend) {
+            // same contract as decodeAudioData over the concatenated file;
+            // the backend takes the parts unconcatenated
+            decoded = this.decodeBackend.decode(this.ctx, init.bytes,
+                                                prev ? prev.bytes : null, entry.bytes);
+        } else {
+            const parts = prev ? [init.bytes, prev.bytes, entry.bytes] : [init.bytes, entry.bytes];
+            let len = 0; parts.forEach(function (p) { len += p.byteLength; });
+            const buf = new Uint8Array(len);
+            let o = 0; parts.forEach(function (p) { buf.set(p, o); o += p.byteLength; });
+            decoded = this.ctx.decodeAudioData(buf.buffer);
+        }
+        decoded.then(function (ab) {
             self.inflight.delete(key);
             if (self.destroyed || self.degraded) return;
             if (entry.epoch !== self.epoch && !self._epochVisible(entry.epoch)) return;
             self.counters.decodes++;
             self._storeDecoded(entry, prev, init, ab, key);
             self._pump();
-        }).catch(function () {
+        }).catch(function (err) {
             self.inflight.delete(key);
             if (self.destroyed) return;
             self.counters.decodeFails++;
+            // the first few reasons, not every retry: a decode failure's cause
+            // is the whole diagnosis and was invisible here until 2026-08-25
+            if (self.counters.decodeFails <= 3)
+                console.warn('SegmentAudioFeed: decode failed:', (err && (err.message || err.name)) || err);
             if (!self.retried.has(key)) { self.retried.add(key); return; } // one retry on a later pump
             self._strike();
         });
@@ -484,25 +836,34 @@ export default class SegmentAudioFeed {
     }
 
     _storeDecoded(entry, prev, init, ab, key) {
-        const sr = this.ctx.sampleRate;
-        const frame = Math.round(0.020 * sr); // Opus frame grid: exact at 48k and 44.1k
-        const snap = function (samples) { return Math.round(samples / frame) * frame; };
-        let offset = 0;
+        // The buffer's own rate: decodeAudioData resamples to the context rate
+        // so this is identical on the native path, but the WASM backend returns
+        // the stream's 48 kHz and the source nodes resample on playout instead.
+        const sr = ab.sampleRate || this.ctx.sampleRate;
+        let offset = 0, preSmp = 0;
         let tEff = entry.t;
         let span;
         if (prev) {
-            // prefer measured cluster timestamps for the prev duration; the
-            // constant container offset cancels in the difference
-            let prevDur = prev.dur;
-            const tc = init.timecodeScale;
-            const cPrev = this._clusterTimestampS(prev.bytes, tc);
-            const cK = this._clusterTimestampS(entry.bytes, tc);
-            if (cPrev != null && cK != null && cK > cPrev) prevDur = cK - cPrev;
-            const frontLoss = Math.max(0, Math.round((prevDur + entry.dur) * sr) - ab.length);
-            offset = snap(Math.round(prevDur * sr) - frontLoss);
-            if (offset < 0) offset = 0;
-            if (offset > ab.length) offset = Math.max(0, ab.length - 1);
+            // TAIL-ANCHORED: the pair decode ends exactly at this chunk's end,
+            // so the junction sits entry.dur before that end - independent of
+            // how long the decoded prev actually was. The earlier form placed
+            // it prevDur from the FRONT, and prev.dur understates by the
+            // pre-skip for a VOD's first chunk, an error that then propagated
+            // through every later junction (~6 ms of misplaced content per
+            // join: the metronomic VOD click, 2026-08-25). Live was immune
+            // only because a mid-stream first chunk loses nothing.
+            // NOT frame-snapped: the stream-start pre-skip shifts every frame
+            // boundary off the nominal 20 ms grid, so snapping the junction
+            // re-introduces the exact misplacement tail-anchoring removes.
+            // Copying from an arbitrary sample offset is fine - frame
+            // alignment is a decoder concern and decode already happened.
+            offset = Math.max(0, ab.length - Math.round(entry.dur * sr));
             span = Math.min(ab.length - offset, Math.round(entry.dur * sr));
+            // keep a crossfade pre-roll of the previous chunk's tail; identical
+            // content to what the previous node plays there, by construction
+            preSmp = Math.min(XF_SMP, offset);
+            offset -= preSmp;
+            span += preSmp;
         } else {
             // chain start: account the stream-start loss (pre-skip region) so
             // the successor still lands at the true junction and this chunk is
@@ -525,7 +886,7 @@ export default class SegmentAudioFeed {
             ab.copyFromChannel(tmp, c, offset);
             out.copyToChannel(tmp, c, 0);
         }
-        this.decoded.set(key, { t: tEff, dur: span / sr, buffer: out, lastUse: performance.now() });
+        this.decoded.set(key, { t: tEff, dur: (span - preSmp) / sr, preS: preSmp / sr, buffer: out, lastUse: performance.now() });
     }
 
     _strike() {
@@ -550,6 +911,19 @@ export default class SegmentAudioFeed {
         // 100 ms class with no other observable event
         if (this.pumpCount % 10 === 1)
             this.outputLatency = this.ctx.outputLatency || this.ctx.baseLatency || 0;
+
+        // A paused element loads nothing on either route, so paused time must
+        // not count against the no-fragments watchdog: pressing play in a tab
+        // that sat idle degraded the feed instantly (2026-08-25).
+        if (el.paused) this.lastFragAt = performance.now();
+
+        // self-fetch coverage from the element clock. Fragment-completion
+        // triggering alone starves on VOD, where dash.js fills its video
+        // buffer within seconds and then never loads again; the clock-driven
+        // sweep also covers seeks and the live edge (a 404 on a segment not
+        // yet available is retried by the next sweep).
+        if (this.selfFetchAudio && this._sf && this._sf.segDur && !el.paused)
+            this._sfEnsure(el.currentTime);
 
         // watchdog: an advancing element with no audio fragments means the tap
         // is not delivering (wrong dash.js surface, changed event payload):
@@ -613,15 +987,45 @@ export default class SegmentAudioFeed {
             // corrector fights it forever.
             const chunk = this._decodedAt(playhead);
             if (!chunk) return; // decode in flight; bounded silence, never a fight
+            // never anchor onto placeholder filters (see renderReady)
+            if (!this.renderReady) { this._ensureDecoded(playhead); return; }
+            // wait for MIN_START_AHEAD_S of contiguous decoded content before
+            // anchoring (unless the stream has nothing more to offer): Safari's
+            // first seconds otherwise underrun-resync audibly while WASM and
+            // the video pipeline fight for the main thread
+            let covered = 0, tScan = playhead;
+            for (;;) {
+                const c = this._decodedAt(tScan + 0.001);
+                if (!c) break;
+                const adv = (c.rec.t + c.rec.dur) - tScan;
+                if (adv <= 0) break;
+                covered += adv; tScan += adv;
+                if (covered >= MIN_START_AHEAD_S) break;
+            }
+            if (covered < MIN_START_AHEAD_S) {
+                let ringMax = -Infinity;
+                for (let i = 0; i < this.ring.length; i++)
+                    ringMax = Math.max(ringMax, this.ring[i].t + this.ring[i].dur);
+                if (ringMax > tScan + 0.05) return;   // more is coming: wait
+            }
             const ol = this.outputLatency;
             const into = Math.max(0, playhead - chunk.rec.t) + START_LEAD_S + ol;
             this.anchor = { ctxAt: now - ol, mediaAt: playhead };
             if (into < chunk.rec.dur) {
                 this._startNode(chunk.rec, into, now + START_LEAD_S, true);
-            } // else: playhead is at the chunk tail; the loop below starts from the next chunk
+                // The anchor node's endCtx works out to exactly
+                // anchor.ctxAt + (nextT - anchor.mediaAt), i.e. nextCtx, so the
+                // next chunk has a crossfade partner waiting and the junction
+                // is seamless. Forcing a fade here instead cost an audible
+                // amplitude notch at the first junction - one drop ~2 s in,
+                // then silence-clean thereafter, in every engine.
+            } else {
+                // playhead is at the chunk tail: no anchor node, so the next
+                // chunk opens the chain cold and its edge does need a fade
+                this._forceFade = true;
+            }
             this.nextT = chunk.rec.t + chunk.rec.dur;
             this.nextCtx = this.anchor.ctxAt + (this.nextT - this.anchor.mediaAt);
-            this._forceFade = true;
         }
 
         while (this.nextCtx !== null && this.nextCtx - now < HORIZON_S) {
@@ -684,13 +1088,75 @@ export default class SegmentAudioFeed {
         return found;
     }
 
-    _startNode(rec, offsetS, whenCtx, rampIn) {
+    _startNode(rec, offsetS, whenCtx, rampInArg) {
+        let rampIn = rampInArg;
         const src = this.ctx.createBufferSource();
         src.buffer = rec.buffer;
         const g = this.ctx.createGain();
         src.connect(g); g.connect(this.feedBus);
-        const when = Math.max(whenCtx, this.ctx.currentTime + 0.005);
-        if (rampIn) {
+        const preS = rec.preS || 0;
+        // CROSSFADED JOIN. When this chunk carries pre-roll (identical, by
+        // pair-decode, to the previous chunk's tail), start it preS early and
+        // fade the pair linearly across the overlap: identical content under
+        // gains summing to 1 is an exact join, whatever the engine rounds the
+        // start time to. Only for seamless chains (offsetS 0, no correction
+        // fade requested, and a node actually ending at this junction).
+        let xfPrev = null;
+        if (!rampIn && offsetS === 0 && preS > 0 && this.nodes.length) {
+            const cand = this.nodes[this.nodes.length - 1];
+            if (Math.abs(cand.endCtx - whenCtx) < 0.001) xfPrev = cand;
+        }
+        if (xfPrev) whenCtx -= preS;
+        else offsetS += preS;   // no crossfade partner: skip the pre-roll content
+        let when = Math.max(whenCtx, this.ctx.currentTime + 0.005);
+        // OVERLAP GUARD. A chained node must never begin before the previous
+        // node's scheduled end: that plays two chunks at once (the operator
+        // observed a -13225-sample overlap, 0.28 s of doubled audio, at a VOD
+        // end on 2026-08-25) and the chain does not self-heal afterwards.
+        // The originating path was never reproduced headlessly, so rather than
+        // guess at it this makes the bad state unreachable and counts it -
+        // if the counter ever moves, the log line says where from.
+        if (this.nodes.length) {
+            const lastEnd = this.nodes[this.nodes.length - 1].endCtx;
+            const overlapS = lastEnd - (rampIn ? when : when + preS);
+            if (overlapS > 0.002) {
+                this.counters.overlaps = (this.counters.overlaps || 0) + 1;
+                if (this.counters.overlaps <= 3)
+                    console.warn('SegmentAudioFeed: junction overlap of '
+                        + (overlapS * 1000).toFixed(1) + ' ms suppressed (state=' + this.state
+                        + ', rampIn=' + !!rampIn + ', xf=' + !!xfPrev + ')');
+                // start at the previous end instead, skipping the overlapping
+                // content so placement stays truthful, and fade the edge
+                if (overlapS < rec.dur * 0.5) {
+                    offsetS += overlapS;
+                    when = lastEnd;
+                    if (xfPrev) { xfPrev = null; }   // partner content no longer aligns
+                    rampIn = true;
+                } else {
+                    return;   // wholly covered: dropping it is the honest answer
+                }
+            }
+        }
+        // SAMPLE-ALIGN the schedule. when and offset are float seconds, and
+        // 95688/48000-style values are not binary-exact, so consecutive nodes
+        // can land up to half a sample apart on the context's sample grid: a
+        // phase jump per junction, inaudible in noise or music and a clean
+        // tick on a sine (heard on the orbit test, Safari and Brave alike,
+        // 2026-08-25). Rounding both to whole samples makes the butt joint
+        // exact by construction; buffers are at the context rate since the
+        // 48 kHz context change, so no resampling reintroduces error.
+        const SR = this.ctx.sampleRate;
+        when = Math.round(when * SR) / SR;
+        offsetS = Math.max(0, Math.round(offsetS * SR)) / SR;
+        if (xfPrev) {
+            const xfEnd = when + preS;
+            g.gain.setValueAtTime(0, when);
+            g.gain.linearRampToValueAtTime(1, xfEnd);
+            try {
+                xfPrev.gain.gain.setValueAtTime(1, when);
+                xfPrev.gain.gain.linearRampToValueAtTime(0, xfEnd);
+            } catch (e) { /* previous node already gone: plain fade-in remains */ }
+        } else if (rampIn) {
             g.gain.setValueAtTime(0, when);
             g.gain.linearRampToValueAtTime(1, when + FADE_S);
         } else {
@@ -698,7 +1164,43 @@ export default class SegmentAudioFeed {
         }
         try { src.start(when, offsetS); } catch (e) { return; }
         rec.lastUse = performance.now();
-        const node = { src: src, gain: g, ctxStart: when, endCtx: when + (rec.dur - offsetS) };
+        // endCtx is the LOGICAL junction end, from integer sample spans:
+        //  crossfade: started preS early, plays preS+dur -> ends at when+preS+dur
+        //  otherwise: offsetS already includes the skipped pre-roll, so the
+        //             node plays (preS + dur - offsetS) from `when`
+        const endCtx = xfPrev
+            ? when + Math.round((preS + rec.dur) * SR) / SR
+            : when + Math.round((preS + rec.dur - offsetS) * SR) / SR;
+        // junction census: a healthy steady chain is all crossfades. Faded
+        // joins are legitimate at a cold start, a hole rejoin or a correction,
+        // so this counts them rather than warning - a climbing fadedJoins
+        // against a still decodes count is the signature of a chain that has
+        // stopped joining cleanly.
+        if (xfPrev) this.counters.xfades++;
+        else if (rampIn) {
+            this.counters.fadedJoins++;
+            if (this.fadedAt.length < 16)
+                this.fadedAt.push(+(rec.t + offsetS).toFixed(3));
+        }
+        const node = { src: src, gain: g, ctxStart: when, endCtx: endCtx };
+        // junction-seam audit: the gap between the previous node's scheduled
+        // end and this start, in samples at the context rate. Zero is a
+        // sample-exact butt joint; anything else is audible as a tick and
+        // invisible to every counter. Kept at debug level, capped.
+        if (this.nodes.length) {
+            const prevEnd = this.nodes[this.nodes.length - 1].endCtx;
+            // junction alignment: a crossfaded node starts preS EARLY by design,
+            // so compare the junction it lands on, not its start time
+            const gapSmp = ((xfPrev ? when + preS : when) - prevEnd) * this.ctx.sampleRate;
+            this._seamLog = this._seamLog || [];
+            if (this._seamLog.length < 24) {
+                const tag = Math.abs(gapSmp) > 24000 ? ' (hole/restart, expected)'
+                          : xfPrev ? ' (xf)' : rampIn ? ' (ramped)' : '';
+                this._seamLog.push(Math.round(gapSmp * 100) / 100);
+                console.debug('SegmentAudioFeed seam[' + this._seamLog.length + ']: '
+                    + gapSmp.toFixed(2) + ' samples' + tag);
+            }
+        }
         this.nodes.push(node);
         const self = this;
         src.onended = function () {
@@ -732,7 +1234,7 @@ export default class SegmentAudioFeed {
         if (this.nextT === null || this.nextCtx === null) return;
         const d = this._medianDrift();
         if (Math.abs(d) <= DEADBAND_S) return;
-        if (Math.abs(d) > HARD_RESYNC_S) { this._hardResync(); return; }
+        if (Math.abs(d) > HARD_RESYNC_S) { this._hardResync('drift ' + (d * 1000).toFixed(0) + 'ms'); return; }
         // one bounded schedule-time step, applied at the NEXT junction by the
         // scheduler; all N channels of every chunk move together by
         // construction, so inter-channel phase coherence cannot break
@@ -753,8 +1255,10 @@ export default class SegmentAudioFeed {
         this.driftSamples = [];
     }
 
-    _hardResync() {
+    _hardResync(reason) {
         this.counters.resyncs++;
+        console.debug('SegmentAudioFeed: hard resync #' + this.counters.resyncs
+            + ' (' + (reason || 'drift') + ') drift=' + (this._medianDrift() * 1000).toFixed(1) + 'ms');
         this._flush(RAMP_S);
         this.state = 'running';
         this.driftSamples = [];
@@ -789,6 +1293,7 @@ export default class SegmentAudioFeed {
     _degrade(reason) {
         if (this.degraded || this.destroyed) return;
         this.degraded = true;
+        this.degradeReason = reason;
         console.warn('SegmentAudioFeed: degrading to element audio path (' + reason + ')');
         this._flush(RAMP_S);
         this.detach();
