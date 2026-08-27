@@ -934,10 +934,30 @@ export class HOAST360 {
             // cannot cause double audio). Decoded segment audio drives the
             // graph instead, bypassing Chromium's fixed MSE tap delay.
             this.audioFeed.connectTo(this.rotator.in);
-        } else {
+        } else if (!this._noCapture) {
             this.sourceNode.channelCount = this.numCh;
             this.sourceNode.connect(this.rotator.in);
         }
+        // else: no-capture mode with the feed already degraded, and there is
+        // deliberately nothing to wire.
+        //
+        // _onFeedDegrade handles a degrade that happens mid-session, but the
+        // feed can also fail during SETUP, before this graph is built: an
+        // on-demand manifest addresses audio with SegmentBase, self-fetch only
+        // understands SegmentTemplate, and it gives up immediately because a
+        // manifest shape is not a transient error. Arriving here with
+        // _feedDegraded already true is therefore normal, not exceptional.
+        //
+        // In no-capture mode no MediaElementSource was ever created: the
+        // element is silenced by a mute pin rather than by capture, and
+        // _onFeedDegrade has already released that pin so the element carries
+        // its own audio. This branch used to run anyway and threw on
+        // `null.channelCount`, killing playback outright, which is how a VOD
+        // clip in Safari became a spinner that never resolved.
+        //
+        // Creating the node here instead would be worse than the crash:
+        // createMediaElementSource reroutes the element into the graph, so an
+        // element that was about to play its own audio would go silent.
 
         if (this.zoomEnabled) {
             this.rotator.out.connect(this.multiplier.in);
