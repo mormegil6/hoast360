@@ -736,6 +736,18 @@ export class HOAST360 {
             mp.on('qualityChangeRendered', function (e) {
                 if (e && e.mediaType === 'video') reportSelection(e.newQuality);
             });
+            // A pick made while PAUSED renders nothing, so the event above never
+            // arrives and the menu keeps its previous tick until playback
+            // resumes: the switch has happened, only the highlight lies. Same
+            // shape as the Auto case that force exists for, one step further
+            // out. dash.js announces the switch it is about to make separately,
+            // and that does fire while paused, so report it too. force, because
+            // picking the rendition dash.js already holds is exactly the case
+            // that otherwise reports nothing. The rendered event still follows
+            // and agrees; this only makes the menu honest sooner.
+            mp.on('qualityChangeRequested', function (e) {
+                if (e && e.mediaType === 'video') reportSelection(e.newQuality, true);
+            });
             mp.on('streamInitialized', function () {
                 populate();
                 // Whatever dash.js already chose, before any switch happens.
