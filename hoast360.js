@@ -303,14 +303,35 @@ export class HOAST360 {
         // (docs/IOS-SAFARI.md) and must not be bounced to "use Chrome" for a
         // codec path this player no longer needs there.
         const qpEarly = new URLSearchParams(window.location.search);
-        let mseOpusEarly = false;
-        try {
-            const MSE = window.MediaSource || window.ManagedMediaSource;
-            mseOpusEarly = !!MSE && MSE.isTypeSupported('audio/mp4; codecs="opus"');
-        } catch (e) { /* absent */ }
-        const wasmFeedPlanned = String(newMediaUrl).includes('.mpd')
+        // Safari (macOS and iOS alike) cannot decode multichannel Opus through
+        // ANY native route - decodeAudioData, WebCodecs, MSE - measured in
+        // docs/IOS-SAFARI.md. Its MSE/ManagedMediaSource also refuses the
+        // audio/mp4 opus type outright, so dash.js will drop the audio
+        // AdaptationSet there on its own and drive video only. The feed then
+        // carries the audio, decoding through libopus-in-WASM instead of
+        // decodeAudioData. Probed by capability, not user agent, so any other
+        // browser with the same gap gets the same treatment; ?wasmaudio forces
+        // the WASM backend anywhere for A/B measurement.
+        const MSEarly = window.MediaSource || window.ManagedMediaSource;
+        let mseOpus = false;
+        try { mseOpus = !!MSEarly && MSEarly.isTypeSupported('audio/mp4; codecs="opus"'); } catch (e) { /* absent */ }
+        this._feedBackend = (qpEarly.has('wasmaudio') || (!IS_CHROMIUM && !mseOpus)) ? 'wasm' : 'native';
+        // THE TYPE CHECK LIES ON iOS. iOS 26.6 answers isTypeSupported
+        // ('audio/mp4; codecs="opus"') TRUE (probe run kc5du0), where macOS
+        // Safari says false, so the type check alone would land iPhone on
+        // native audio and hand the 16-channel set to a decoder that has never
+        // demonstrated multichannel. The REAL decode probe outranks the type
+        // check: a non-Chromium browser that failed multichannel gets the WASM
+        // feed no matter what isTypeSupported claims.
+        if (!IS_CHROMIUM && this._feedBackend === 'native' && !opus.ok) {
+            console.log('HOAST360: MSE claims Opus-in-MP4 but the multichannel '
+                + 'decode probe failed; taking the WASM feed instead');
+            this._feedBackend = 'wasm';
+        }
+        this._useSegmentFeed = String(newMediaUrl).includes('.mpd')
             && !qpEarly.has('legacyaudio')
-            && (qpEarly.has('wasmaudio') || (!IS_CHROMIUM && !mseOpusEarly));
+            && (IS_CHROMIUM || this._feedBackend === 'wasm');
+        const wasmFeedPlanned = this._useSegmentFeed && this._feedBackend === 'wasm';
         if (!this.opusSupport && wasmFeedPlanned) {
             console.log('HOAST360: native Opus probe failed (' + (opus.diagnosis || 'no decode')
                 + '), continuing on the WASM audio feed, which does not use the platform decoder');
@@ -360,9 +381,10 @@ export class HOAST360 {
         this.irUrl = newIrUrl;
         this._setOrderDependentVariables();
 
-        // Segment-audio feed (combined-MPD path, Chromium only): bypasses the
-        // MSE element tap and its fixed ~2 s delay. Must be decided BEFORE
-        // src() below, because the beforeinitialize hook reads the flag.
+        // Segment-audio feed (combined-MPD path): bypasses the MSE element
+        // tap and its fixed ~2 s delay. Decided at the top of initialize()
+        // (before src() below, because the beforeinitialize hook reads the
+        // flag), where the opus error gates already need the answer.
         // ?legacyaudio forces the old wiring for A/B measurements.
         this._xrReady = false;
         this._feedN = 0;
@@ -371,23 +393,10 @@ export class HOAST360 {
         // pair-decode on a real phone, via ?audiofeed) passed 2026-07-21 with
         // no dropouts, and the degrade path covers weaker devices. ?legacyaudio
         // still forces the old element-audio wiring anywhere.
-        const qp = new URLSearchParams(window.location.search);
-        // Safari (macOS and iOS alike) cannot decode multichannel Opus through
-        // ANY native route - decodeAudioData, WebCodecs, MSE - measured in
-        // docs/IOS-SAFARI.md. Its MSE/ManagedMediaSource also refuses the
-        // audio/mp4 opus type outright, so dash.js will drop the audio
-        // AdaptationSet there on its own and drive video only. The feed then
-        // carries the audio, decoding through libopus-in-WASM instead of
-        // decodeAudioData. Probed by capability, not user agent, so any other
-        // browser with the same gap gets the same treatment; ?wasmaudio forces
-        // the WASM backend anywhere for A/B measurement.
-        const MS = window.MediaSource || window.ManagedMediaSource;
-        let mseOpus = false;
-        try { mseOpus = !!MS && MS.isTypeSupported('audio/mp4; codecs="opus"'); } catch (e) { /* absent */ }
-        this._feedBackend = (qp.has('wasmaudio') || (!IS_CHROMIUM && !mseOpus)) ? 'wasm' : 'native';
-        this._useSegmentFeed = this.mediaUrl.includes('.mpd')
-            && !qp.has('legacyaudio')
-            && (IS_CHROMIUM || this._feedBackend === 'wasm');
+        // Backend and feed mode were decided at the top of initialize(), where
+        // the error gates need them; nothing here may redecide them, or the
+        // probe-outranks-typecheck override above would be silently undone.
+        const qp = qpEarly;
 
         // RENDER AT THE DISPLAY'S REAL PIXEL RATIO. Default since 2026-08-17.
         //
