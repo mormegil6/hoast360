@@ -1,5 +1,5 @@
 diff --git a/node_modules/dashjs/dist/dash.all.debug.js b/node_modules/dashjs/dist/dash.all.debug.js
-index 4ecc55a..f4fdbff 100644
+index 4ecc55a..5b76877 100644
 --- a/node_modules/dashjs/dist/dash.all.debug.js
 +++ b/node_modules/dashjs/dist/dash.all.debug.js
 @@ -14173,7 +14173,18 @@ function TimelineSegmentsGetter(config, isDynamic) {
@@ -38,18 +38,22 @@ index 4ecc55a..f4fdbff 100644
      var list = base.SegmentURL_asArray;
      var time = 0;
      var relativeIdx = -1;
-@@ -29122,15 +29140,21 @@ function MediaSourceController() {
+@@ -29122,15 +29140,25 @@ function MediaSourceController() {
      var hasMediaSource = ('MediaSource' in window);
      var hasManagedMediaSource = ('ManagedMediaSource' in window);
  
 -    if (hasManagedMediaSource) {
-+    // HOAST360 patch: prefer plain MediaSource over ManagedMediaSource when
-+    // both exist (macOS Safari 26+). Upstream prefers MMS unconditionally, and
-+    // real Safari 27 then never fires sourceopen for this player (readyState
-+    // stuck at 0, measured 2026-08-28), while the plain-MSE path is the one
-+    // this player shipped on for weeks. MMS remains for the engines that have
-+    // nothing else - iPhone - where disableRemotePlayback is set early.
-+    if (hasMediaSource) {
++    // HOAST360 patch: prefer plain MediaSource when both engines exist (macOS
++    // Safari 26+); upstream prefers ManagedMediaSource unconditionally. This is
++    // scope reduction, not the fix: the stall it avoids is the request latch
++    // patched in ScheduleController above, and iPhone, which has only MMS,
++    // cannot avoid that path. Keeping desktop Safari on the engine this player
++    // shipped on for weeks is the conservative default; ?forcemms=1 puts a
++    // desktop browser back on the iPhone path so the MMS route can be
++    // regression-tested on hardware that has a debugger.
++    var forceMms = false;
++    try { forceMms = /[?&]forcemms=1/.test(window.location.search); } catch (e) { /* no location */ }
++    if (hasMediaSource && !forceMms) {
 +      mediaSource = new MediaSource();
 +      mediaSourceType = 'mediaSource';
 +      logger.info("Created MediaSource");
@@ -65,7 +69,48 @@ index 4ecc55a..f4fdbff 100644
      } else if (hasWebKit) {
        mediaSource = new WebKitMediaSource();
        logger.info("Created WebkitMediaSource");
-@@ -52826,6 +52850,14 @@ function TextSourceBuffer(config) {
+@@ -29141,10 +29169,17 @@ function MediaSourceController() {
+ 
+   function attachMediaSource(videoModel) {
+     var objectURL = window.URL.createObjectURL(mediaSource);
++    // HOAST360 patch: WebKit activates a ManagedMediaSource only for an element
++    // with remote playback disabled (or an AirPlay source alternative), so set
++    // that BEFORE handing over the source rather than one statement after it.
++    // Upstream's order leaves a window where the element is attached without the
++    // precondition met.
++    if (mediaSourceType === 'managedMediaSource') {
++      videoModel.setDisableRemotePlayback(true);
++    }
+     videoModel.setSource(objectURL);
+ 
+     if (mediaSourceType === 'managedMediaSource') {
+-      videoModel.setDisableRemotePlayback(true);
+       mediaSource.addEventListener('startstreaming', function () {
+         eventBus.trigger(_MediaPlayerEvents__WEBPACK_IMPORTED_MODULE_3__["default"].MANAGED_MEDIA_SOURCE_START_STREAMING);
+       });
+@@ -30453,7 +30488,20 @@ function ScheduleController(config) {
+ 
+   function _shouldScheduleNextRequest() {
+     try {
+-      if (!managedMediaSourceAllowsRequest) {
++      // HOAST360 patch: honour the ManagedMediaSource throttle only once there
++      // is something to throttle. ManagedMediaSource 'endstreaming' means "stop
++      // reading ahead", but upstream latches it into "never request anything",
++      // ahead of every other test and including the init segment. Real Safari 27
++      // sends endstreaming for an element that is paused and has no data, which
++      // is a deadlock: WebKit will not ask for data for a stream that cannot
++      // play, and dash.js will not fetch until asked. Measured 2026-08-28 as
++      // ZERO .m4s requests with readyState stuck at 0, and it is the only path
++      // in the bundle that suppresses even the init request. Once a quality is
++      // initialised and the buffer is non-empty, the hint is real prefetch
++      // pressure and is obeyed as upstream intends.
++      if (!managedMediaSourceAllowsRequest
++          && !isNaN(lastInitializedQuality)
++          && dashMetrics.getCurrentBufferLevel(type) > 0) {
+         return false;
+       }
+ 
+@@ -52826,6 +52874,14 @@ function TextSourceBuffer(config) {
        }
  
        samplesInfo = boxParser.getSamplesInfo(bytes);
@@ -80,7 +125,7 @@ index 4ecc55a..f4fdbff 100644
        var sequenceNumber = samplesInfo.lastSequenceNumber;
        var chunkStart = Math.trunc(chunk.start);
        var chunkEnd = Math.trunc(chunk.end);
-@@ -54982,6 +55014,19 @@ function BoxParser() {
+@@ -54982,6 +55038,19 @@ function BoxParser() {
      var moofBoxes = isoFile.getBoxes('moof'); // exactly one mfhd per moof
  
      var mfhdBoxes = isoFile.getBoxes('mfhd');
