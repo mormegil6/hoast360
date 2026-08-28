@@ -2,8 +2,14 @@
   display: none !important;
 }
 
-.video-js .vjs-http-source-selector {
+/* SCOPE THIS TO THE BUTTON. videojs-http-source-selector puts its class on the
+   root video-js element as well as on its control, so an unscoped rule styles
+   the whole player: measured as a 346x173 "button" filling the frame, which is
+   why sizing the icon by eye kept misbehaving. Everything below is under
+   .vjs-control-bar for that reason. */
+.video-js .vjs-control-bar .vjs-http-source-selector {
     display: block;
+    position: relative;
 }
 
 /* AN SVG, BECAUSE THE ICON FONT DOES NOT LOAD ON iOS. video.js inlines its
@@ -13,10 +19,7 @@
    iPhone Xs showed an unrecognisable shape where the settings gear belongs on
    2026-08-28. The VR button beside it was always correct because it was already
    drawn this way. Same glyph, no font dependency. */
-.video-js .vjs-http-source-selector {
-    position: relative;
-}
-.vjs-http-source-selector .vjs-icon-placeholder {
+.vjs-control-bar .vjs-http-source-selector .vjs-icon-placeholder {
     /* Absolute inside the button rather than sized in em: the placeholder is an
        inline span whose height comes from line-height, so a background on it
        rode high in the bar and looked like a superscript next to the font
@@ -30,9 +33,11 @@
     /* Fill the button cell and centre the glyph in it, the way video.js's own
        font icons sit. Sizing the box in em and leaving it inline made it hang
        off the top of the bar like a superscript. */
-    background-size: 1.7em 1.7em;
+    /* The gear artwork leaves margin inside its viewBox, so it needs a
+       slightly larger box than the loop glyph beside it to read the same. */
+    background-size: 2.4em 2.4em;
 }
-.vjs-http-source-selector .vjs-icon-placeholder::before {
+.vjs-control-bar .vjs-http-source-selector .vjs-icon-placeholder::before {
     content: ""
 }
 
