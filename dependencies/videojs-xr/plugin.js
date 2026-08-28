@@ -376,6 +376,22 @@ class Xr extends Plugin {
             var self = this;
             navigator.xr.isSessionSupported('immersive-vr').then(function (supported) {
                 self.xrSupported = supported;
+                // DO NOT OFFER VR WHERE IT ONLY BREAKS THE PLAYER. iOS answers
+                // isSessionSupported('immersive-vr') with true on a phone that
+                // has no headset, and taking it up gives a black canvas, then a
+                // freeze that only a reload clears, with audio still running
+                // underneath. Measured repeatedly on an iPhone Xs on
+                // 2026-08-28, including after the session-teardown fix, so the
+                // button is a trap rather than a feature there. The engine test
+                // is the same one used elsewhere for iOS: ManagedMediaSource as
+                // the only media engine.
+                var mmsOnly = !window.MediaSource && !!window.ManagedMediaSource;
+                if (supported && mmsOnly) {
+                    console.log('videojs-xr: immersive-vr reported supported, but this '
+                        + 'engine cannot present it usefully; not offering the VR button');
+                    self.xrSupported = false;
+                    return;
+                }
                 if (supported) {
                     self.addCardboardButton_();
                     console.log('webxr session supported');

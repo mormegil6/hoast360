@@ -50,3 +50,27 @@ html.hoast-pseudo-fs-lock body {
     overflow: hidden !important;
     overscroll-behavior: none;
 }
+
+/* CONTROL BAR ON A NARROW PHONE. video.js sizes its controls from the font
+   size, and at the default the buttons on a portrait iPhone are wide enough
+   that the last one, the VR button, is clipped off the edge: it was reachable
+   only in landscape, reported from an iPhone Xs on 2026-08-28. Shrink the
+   controls below the width where they stop fitting rather than removing any,
+   since each one is the only way to reach what it does. */
+@media (max-width: 480px) {
+    .video-js .vjs-control-bar {
+        font-size: 8.5px;
+        height: 3.4em;
+    }
+    .video-js .vjs-control {
+        width: 3.2em;
+    }
+    /* The time display and the remaining-time readout are the least useful
+       things on a 120 s clip and the first to give up their space. */
+    .video-js .vjs-current-time,
+    .video-js .vjs-duration,
+    .video-js .vjs-time-divider,
+    .video-js .vjs-remaining-time {
+        display: none;
+    }
+}

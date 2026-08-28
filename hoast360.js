@@ -49,7 +49,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf39';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf40';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -95,6 +95,36 @@ videojs.Html5DashJS.hook('beforeinitialize', function (player, mediaPlayer) {
             bufferTimeAtTopQualityLongForm: 8
         }
     } });
+    // KEEP PHONES OFF THE 4K H.264 RUNG. An iPhone Xs plays it, then raises
+    // MEDIA_ERR_DECODE or freezes outright, repeatedly, on 2026-08-28. The
+    // stream is not the problem: it was measured well inside H.264 level 5.1
+    // (78% of MaxFS, 70% of MaxMBPS, 5 of 6 DPB frames). The device is simply
+    // out of headroom decoding 3840x1920 while also running a WebGL sphere, 16
+    // convolvers and a WASM Opus worker.
+    //
+    // Only the H.264 ladder and only the engines that have nothing but
+    // ManagedMediaSource, which is iOS. An AV1-capable device never sees this
+    // AdaptationSet, and the desktops that fall back to H.264 showed none of
+    // this. Dropping the rung is better than leaving it selectable: ABR cannot
+    // see a hard decode error (it increments no dropped-frame counter), and
+    // dash.js's recovery resumes at the same rung and fails again.
+    //
+    // The cost is 8% of linear resolution. The camera shows a 113.8 degree
+    // horizontal slice of the equirect, so at the phone's player box the 2880
+    // rung still delivers about 0.92 device pixels per screen pixel against
+    // 1.22 for the 4K one, and in landscape neither oversupplies.
+    if (!window.MediaSource && window.ManagedMediaSource
+        && mediaPlayer.registerCustomCapabilitiesFilter) {
+        mediaPlayer.registerCustomCapabilitiesFilter(function (representation) {
+            try {
+                var codec = (representation && representation.codecs) || '';
+                var width = (representation && representation.width) || 0;
+                if (/^avc1/.test(codec) && width > 2880) return false;
+            } catch (e) { /* keep it if the shape is unexpected */ }
+            return true;
+        });
+    }
+
     var h = player.__hoast360;
     if (h && h._useSegmentFeed) h._attachSegmentFeed(mediaPlayer);
     attachDvrSeekClamp(player);
