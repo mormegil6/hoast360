@@ -632,12 +632,21 @@ export class HOAST360 {
             // only activates MMS when remote playback is disabled (or an AirPlay
             // source alternative exists) - without this, sourceopen never fires
             // and playback silently never starts. Harmless everywhere else.
-            if (!window.MediaSource && window.ManagedMediaSource) {
-                try {
-                    const vel = this.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el();
+            try {
+                const vel = this.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el();
+                if (!window.MediaSource && window.ManagedMediaSource) {
                     if (vel) vel.disableRemotePlayback = true;
-                } catch (e) { /* tech not ready; dash.js will surface the failure */ }
-            }
+                }
+                // playsinline, unconditionally: without it iPhone enters the
+                // native fullscreen player on play(), which blacks out the
+                // WebGL sphere that paints from this element. Harmless
+                // everywhere else. Probe run kc5du0 verified inline 4K
+                // playback with the attribute present.
+                if (vel) {
+                    vel.setAttribute('playsinline', '');
+                    vel.setAttribute('webkit-playsinline', '');
+                }
+            } catch (e) { /* tech not ready; dash.js will surface the failure */ }
             this.videoPlayer.src({ type: 'application/dash+xml', src: this.mediaUrl });
             this._wireQualityLevels();
             this.audioPlayer = null;
