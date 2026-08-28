@@ -49,7 +49,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf32';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf33';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -73,11 +73,14 @@ const STALL_CHECK_INTERVAL_MS = 15000;
 // fall back to the legacy path in test harnesses.
 const IS_CHROMIUM = typeof navigator !== 'undefined' && /Chrome\//.test(navigator.userAgent);
 
-// The combined-MPD path runs on videojs-contrib-dash's own inlined dash.js
-// (not the dashjs package import!), reachable only through this hook. It
-// fires after the MediaPlayer is created, before initialize(). NOTE: it fires
-// on BOTH the combined and the separate-MPD path, so feed attachment is gated
-// by the flag the owning instance sets before calling src().
+// The combined-MPD path is driven through this hook, which fires after the
+// MediaPlayer is created and before initialize(). It used to run on
+// videojs-contrib-dash's own inlined dash.js 4.2.0 rather than the dashjs
+// package import; since the webpack alias bundles contrib-dash from source
+// (rf31) there is one dash.js, the patched 4.7.4, on every path. NOTE: the
+// hook fires on BOTH the combined and the separate-MPD path, so feed
+// attachment is gated by the flag the owning instance sets before calling
+// src().
 videojs.Html5DashJS.hook('beforeinitialize', function (player, mediaPlayer) {
     mediaPlayer.updateSettings({ streaming: {
         delay: { liveDelay: LIVE_DELAY_S },
