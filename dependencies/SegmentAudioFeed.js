@@ -582,7 +582,23 @@ export default class SegmentAudioFeed {
         // @duration manifests carry no timeline; the grid is the truth there
         const rel = elT - sf.p0;
         const n0 = Math.max(sf.aStart, sf.aStart + Math.floor((rel - 0.5) / sf.segDur));
-        const n1 = sf.aStart + Math.floor((rel + HORIZON_S) / sf.segDur);
+        let n1 = sf.aStart + Math.floor((rel + HORIZON_S) / sf.segDur);
+        // STOP THE GRID AT THE END OF THE MEDIA. The horizon is 12 s, so from
+        // about 10 s before the end of a finite clip this walked past the last
+        // segment and asked for numbers that do not exist. Those 404s are not
+        // behind the playhead, so the catch below used to drop their keys and
+        // let every sweep ask again, for a set that grew as the horizon moved:
+        // an accelerating request storm in the final seconds. An iPhone Xs died
+        // there every time, at the same second, roughly 10 s before the end of
+        // a 120 s clip, with everything healthy in the report before it.
+        // A live stream has no meaningful duration and is unaffected.
+        const elForDur = this.getElement();
+        const elDur = elForDur && isFinite(elForDur.duration) && elForDur.duration > 0
+            ? elForDur.duration : null;
+        if (elDur !== null) {
+            const nLast = sf.aStart + Math.max(0, Math.ceil(elDur / sf.segDur) - 1);
+            if (n1 > nLast) n1 = nLast;
+        }
         for (let n = n0; n <= n1; n++)
             this._sfFetch(n, sf.p0 + (n - sf.aStart) * sf.segDur, sf.segDur);
     }
@@ -620,11 +636,14 @@ export default class SegmentAudioFeed {
             const el = self.getElement();
             const behind = el && t + (dur || 0) < el.currentTime;
             const is404 = /HTTP 404/.test(String(err && err.message || err));
-            // expired live segments never come back: keep the key so the sweep
-            // stops asking. Anything else (not-yet-available at the live edge,
-            // a transient network miss) retries on the next sweep; repeated
-            // misses starve the ring and the stall accounting degrades the feed.
-            if (!(is404 && behind)) self._sfFetched.delete(key);
+            // A segment past the end of a finite clip is as permanent as an
+            // expired one: it will never appear, so keep the key and stop
+            // asking. Without this the sweep re-requested every number beyond
+            // the last one, forever. The bound above should prevent this being
+            // reached at all; it stays as the failsafe, because the bound
+            // depends on the element reporting a duration.
+            const past = el && isFinite(el.duration) && el.duration > 0 && t >= el.duration;
+            if (!(is404 && (behind || past))) self._sfFetched.delete(key);
         });
     }
 

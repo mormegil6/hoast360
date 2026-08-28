@@ -35,7 +35,7 @@
        off the top of the bar like a superscript. */
     /* The gear artwork leaves margin inside its viewBox, so it needs a
        slightly larger box than the loop glyph beside it to read the same. */
-    background-size: 2.4em 2.4em;
+    background-size: 3.4em 3.4em;
 }
 .vjs-control-bar .vjs-http-source-selector .vjs-icon-placeholder::before {
     content: ""
