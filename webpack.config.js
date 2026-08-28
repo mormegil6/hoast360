@@ -48,7 +48,17 @@ const config = {
             // single-line build would be impossible. Production mode
             // re-minifies via terser, and the single alias keeps every
             // `import 'dashjs'` (incl. videojs-contrib-dash) on one instance.
-            'dashjs$': 'dashjs/dist/dash.all.debug.js'
+            'dashjs$': 'dashjs/dist/dash.all.debug.js',
+            // Bundle contrib-dash's SRC, not its dist. The dist inlines a full
+            // dash.js 4.2.0 with no ManagedMediaSource support, so the comment
+            // above ("keeps every import 'dashjs' on one instance") was never
+            // true for the video path: it rode the fossil while the patched
+            // 4.7.4 drove only the unused separate-audio player. The src does
+            // `import 'dashjs'`, lands on the alias above, and iPhone playback
+            // (probe run wwzdd2) exists because of it. The patch's dist hunks
+            // (the live-WebM timeline fix 4.2.0 needed) still apply to
+            // node_modules but no longer ship: 4.7.4 has that fix upstream.
+            'videojs-contrib-dash$': 'videojs-contrib-dash/src/js/videojs-dash.js'
         }
     },
     plugins: [

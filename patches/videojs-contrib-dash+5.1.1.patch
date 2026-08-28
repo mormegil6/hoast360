@@ -1,5 +1,5 @@
 diff --git a/node_modules/videojs-contrib-dash/dist/videojs-dash.es.js b/node_modules/videojs-contrib-dash/dist/videojs-dash.es.js
-index c046088..bea7e8b 100644
+index c046088..cf8b304 100644
 --- a/node_modules/videojs-contrib-dash/dist/videojs-dash.es.js
 +++ b/node_modules/videojs-contrib-dash/dist/videojs-dash.es.js
 @@ -27458,7 +27458,18 @@ function TimelineSegmentsGetter(config, isDynamic) {
@@ -71,3 +71,23 @@ index c046088..bea7e8b 100644
      var sampleDuration, sampleCompositionTimeOffset, sampleCount, sampleSize, sampleDts, sampleList, sample, i, j, k, l, m, n, dataOffset, lastSequenceNumber, numSequences, totalDuration;
      numSequences = isoFile.getBoxes('moof').length;
      lastSequenceNumber = mfhdBoxes[mfhdBoxes.length - 1].sequence_number;
+diff --git a/node_modules/videojs-contrib-dash/src/js/videojs-dash.js b/node_modules/videojs-contrib-dash/src/js/videojs-dash.js
+index 3160b7e..f398014 100644
+--- a/node_modules/videojs-contrib-dash/src/js/videojs-dash.js
++++ b/node_modules/videojs-contrib-dash/src/js/videojs-dash.js
+@@ -432,8 +432,13 @@ videojs.DashSourceHandler.canPlayType = function(type) {
+   return '';
+ };
+ 
+-// Only add the SourceHandler if the browser supports MediaSourceExtensions
+-if (window.MediaSource) {
++// Only add the SourceHandler if the browser supports MediaSourceExtensions.
++// HOAST360 patch: iPhone Safari exposes ONLY ManagedMediaSource, and the
++// dash.js this build rides (4.7.4 via the webpack alias) prefers MMS and
++// drives it correctly; probe run wwzdd2 (iPhone 17) played 4K avc1 through
++// exactly this path. Without this hunk the handler never registers on iPhone
++// and the source falls through to a native element that cannot play DASH.
++if (window.MediaSource || window.ManagedMediaSource) {
+   videojs.getTech('Html5').registerSourceHandler(videojs.DashSourceHandler(), 0);
+ }
+ 
