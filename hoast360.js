@@ -49,7 +49,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf34';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf35';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -763,9 +763,32 @@ export class HOAST360 {
                 if (this._feedBackend === 'wasm') {
                     const tech = this.videoPlayer.tech({ IWillNotUseThisInPlugins: true });
                     if (tech) tech.featuresVolumeControl = true;
+                    // The PANEL and the CONTROL inside it are hidden by two
+                    // separate checkVolumeSupport calls, so unhiding the panel
+                    // alone left a slider that opened and did nothing, reported
+                    // from the iPhone Xs on rf34.
                     const cb = this.videoPlayer.controlBar;
                     const vp = cb && cb.volumePanel;
                     if (vp && vp.removeClass) vp.removeClass('vjs-hidden');
+                    const vc = vp && vp.volumeControl;
+                    if (vc && vc.removeClass) vc.removeClass('vjs-hidden');
+                    // AND THE EVENT NEVER ARRIVES ON iOS. video.js relays
+                    // 'volumechange' from the media element, and setting
+                    // element.volume is a no-op there, so the element never
+                    // fires it and the masterGain handler below never runs: the
+                    // slider moved and nothing got louder. Drive the gain from
+                    // the setter instead, which is the call the slider actually
+                    // makes. The event handler stays for engines that do fire.
+                    const scopeV = this;
+                    const origVolume = this.videoPlayer.volume.bind(this.videoPlayer);
+                    this.videoPlayer.volume = function (value) {
+                        const out = origVolume(value);
+                        if (value !== undefined && scopeV.masterGain
+                            && typeof scopeV._setMasterGain === 'function') {
+                            scopeV._setMasterGain(scopeV._uiMuted ? 0 : value);
+                        }
+                        return out;
+                    };
                 }
                 this._installPseudoFullscreen();
             } catch (e) { /* tech not ready; dash.js will surface the failure */ }
