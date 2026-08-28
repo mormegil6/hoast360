@@ -1063,7 +1063,25 @@ export default class SegmentAudioFeed {
                 // a pending late-correction moved nextT into the chunk: play it
                 // from the matching inner offset (content skip) under a fade
                 const into = Math.max(0, this.nextT - next.t);
-                if (into >= next.dur) { this.nextT = next.t + next.dur; continue; }
+                if (into >= next.dur) {
+                    // THE ADVANCE MUST ADVANCE. This steps over a chunk the
+                    // junction has already passed, which is a real case worth
+                    // keeping. But a chunk SHORTER than the 30 ms join
+                    // tolerance still matches after being consumed, and then
+                    // next.t + next.dur is exactly where nextT already is: the
+                    // assignment is a no-op, nextCtx and now are untouched, and
+                    // the loop cannot terminate. Shaka ends these clips with a
+                    // 7 ms audio segment (t=120.001 d=0.007 in the shipped
+                    // manifests), the only chunk short enough to do it, and an
+                    // iPhone Xs wedged its main thread there at the same second
+                    // of every run. Nothing threw, so there was no error to
+                    // find; the tab was simply killed as unresponsive while
+                    // already-scheduled audio and video played on.
+                    const advanced = next.t + next.dur;
+                    if (!(advanced > this.nextT)) break;   // nothing further to place this pass
+                    this.nextT = advanced;
+                    continue;
+                }
                 this._startNode(next, into, this.nextCtx, into > 0 || this._forceFade);
                 this._forceFade = false;
                 this.nextT = next.t + next.dur;
@@ -1101,27 +1119,13 @@ export default class SegmentAudioFeed {
         return bestKey ? { key: bestKey, rec: bestRec } : null;
     }
 
-    // NEVER RETURN A CHUNK THE JUNCTION HAS ALREADY PASSED. The tolerance is
-    // 30 ms, so a chunk SHORTER than that still matched after the scheduler had
-    // consumed all of it, and the caller's advance test then inverted: `into`
-    // came out greater than the chunk's own duration, the loop reassigned nextT
-    // to the identical value and continued, without touching nextCtx. Bit for
-    // bit the same state, forever, on the main thread.
-    //
-    // Shaka ends these clips with a 7 ms audio segment (t=120.001, d=0.007 in
-    // the shipped manifests), the only one in the clip shorter than the
-    // tolerance, and an iPhone Xs died at the same second of every run because
-    // of it. Nothing threw, so there was no error to find; the thread was
-    // simply gone, which is why the telemetry stopped mid-report and the tab
-    // was killed as unresponsive a few seconds later while already-scheduled
-    // audio and video kept playing.
-    //
-    // Requiring the time to fall INSIDE the chunk costs nothing at a normal
-    // junction, where mediaT equals rec.t exactly.
+    // Matches a chunk whose START is within the join tolerance of the junction.
+    // The caller relies on this still matching when the junction has drifted
+    // PAST the chunk, so it can step over it; see the progress guard there.
     _decodedNear(mediaT) {
         let found = null;
         this.decoded.forEach(function (rec) {
-            if (Math.abs(rec.t - mediaT) <= JOIN_TOL_S && mediaT < rec.t + rec.dur) found = rec;
+            if (Math.abs(rec.t - mediaT) <= JOIN_TOL_S) found = rec;
         });
         return found;
     }
