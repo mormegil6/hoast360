@@ -49,7 +49,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf37';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf38';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -815,15 +815,32 @@ export class HOAST360 {
                     // slider moved and nothing got louder. Drive the gain from
                     // the setter instead, which is the call the slider actually
                     // makes. The event handler stays for engines that do fire.
+                    // VIRTUALISE THE LEVEL, do not just mirror it. Reading it
+                    // back from the element is what broke rf35 on the iPhone Xs:
+                    // a tap on the slider set volume 0, iOS ignored the write so
+                    // the element still reported 1, the bar never moved, and the
+                    // gain went to 0 and stayed there. The result was a control
+                    // that felt dead and a player with no sound at all, with the
+                    // UI insisting the volume was full. Keeping the value here
+                    // makes the bar, the getter and the gain the same number, so
+                    // a slider move is visible and reversible.
                     const scopeV = this;
+                    if (typeof scopeV._uiVolume !== 'number') scopeV._uiVolume = 1;
                     const origVolume = this.videoPlayer.volume.bind(this.videoPlayer);
                     this.videoPlayer.volume = function (value) {
-                        const out = origVolume(value);
-                        if (value !== undefined && scopeV.masterGain
-                            && typeof scopeV._setMasterGain === 'function') {
-                            scopeV._setMasterGain(scopeV._uiMuted ? 0 : value);
-                        }
-                        return out;
+                        if (value === undefined) return scopeV._uiVolume;
+                        let v = Number(value);
+                        if (!isFinite(v)) return scopeV._uiVolume;
+                        v = Math.max(0, Math.min(1, v));
+                        scopeV._uiVolume = v;
+                        try { origVolume(v); } catch (e) { /* iOS ignores the element */ }
+                        if (scopeV.masterGain && typeof scopeV._setMasterGain === 'function')
+                            scopeV._setMasterGain(scopeV._uiMuted ? 0 : v);
+                        // iOS fires no volumechange of its own, because the
+                        // element's volume never actually moved, so the control
+                        // bar would never redraw without this.
+                        scopeV.videoPlayer.trigger('volumechange');
+                        return scopeV.videoPlayer;
                     };
                 }
                 this._installPseudoFullscreen();
