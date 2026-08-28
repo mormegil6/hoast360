@@ -77,7 +77,25 @@ class Xr extends Plugin {
 
         var self = this;
         var sessionInit = { optionalFeatures: ['local-floor'] };
-        navigator.xr.requestSession('immersive-vr', sessionInit).then(function (session) {
+        // A REFUSED SESSION MUST NOT LEAVE THE BUTTON LATCHED. The cardboard
+        // button flips its own active_ flag before this runs, so a rejection
+        // here used to leave it believing VR was on: the next tap called
+        // deactivate on a session that never existed. Report the reason and put
+        // the button back.
+        navigator.xr.requestSession('immersive-vr', sessionInit).catch(function (err) {
+            console.warn('videojs-xr: immersive-vr session refused: '
+                + (err && err.message ? err.message : err));
+            // Put the button back where it was; it flipped its own flag before
+            // asking, so without this the next tap tries to end a session that
+            // was never created.
+            try {
+                const btn = self.player.controlBar.getChild('CardboardButton');
+                if (btn) btn.active_ = false;
+            } catch (e) { /* button already gone */ }
+            self.trigger('xrSessionRefused');
+            return null;
+        }).then(function (session) {
+            if (!session) return;
             self.renderer.xr.setSession(session);
             session.addEventListener('end', self.onXRSessionEnd_);
             self.xrActive = true;
@@ -97,13 +115,26 @@ class Xr extends Plugin {
     }
 
     onXRSessionEnd_() {
-        if (this.animationFrameId_) {
+        if (this.animationFrameId_ && this.currentSession) {
             this.currentSession.cancelAnimationFrame(this.animationFrameId_);
             this.animationFrameId_ = 0;
         }
         this.currentSession = null;
         this.xrActive = false;
+        // HAND THE CANVAS BACK, or leaving VR leaves a black player.
+        // three.js keeps rendering into the XR framebuffer until the session is
+        // cleared, and the session is gone, so every frame after this went
+        // nowhere: an iPhone Xs on 2026-08-28 reported audio continuing over a
+        // black picture after exiting VR, recoverable only by reloading. The
+        // resize restores the drawing buffer and the camera aspect, which the
+        // XR session had taken over.
+        try {
+            if (this.renderer && this.renderer.xr) this.renderer.xr.setSession(null);
+        } catch (e) {
+            console.warn('videojs-xr: could not clear the XR session', e);
+        }
         this.controls3d.enable();
+        this.handleResize_();
         this.trigger('xrSessionDeactivated');
         this.animationFrameId_ = this.requestAnimationFrame(this.animate_);
     }
