@@ -1047,7 +1047,17 @@ export default class SegmentAudioFeed {
             this.nextCtx = this.anchor.ctxAt + (this.nextT - this.anchor.mediaAt);
         }
 
+        // A scheduler loop that cannot terminate must never be able to take the
+        // page down again. The bound is far above any real pass: at a 12 s
+        // horizon and 2 s chunks a healthy sweep runs about six times.
+        let spins = 0;
         while (this.nextCtx !== null && this.nextCtx - now < HORIZON_S) {
+            if (++spins > 200) {
+                this.counters.scheduleSpins = (this.counters.scheduleSpins || 0) + 1;
+                console.warn('SegmentAudioFeed: schedule loop hit its bound at nextT='
+                    + this.nextT + '; breaking out');
+                break;
+            }
             const next = this._decodedNear(this.nextT);
             if (next) {
                 // a pending late-correction moved nextT into the chunk: play it
@@ -1091,10 +1101,27 @@ export default class SegmentAudioFeed {
         return bestKey ? { key: bestKey, rec: bestRec } : null;
     }
 
+    // NEVER RETURN A CHUNK THE JUNCTION HAS ALREADY PASSED. The tolerance is
+    // 30 ms, so a chunk SHORTER than that still matched after the scheduler had
+    // consumed all of it, and the caller's advance test then inverted: `into`
+    // came out greater than the chunk's own duration, the loop reassigned nextT
+    // to the identical value and continued, without touching nextCtx. Bit for
+    // bit the same state, forever, on the main thread.
+    //
+    // Shaka ends these clips with a 7 ms audio segment (t=120.001, d=0.007 in
+    // the shipped manifests), the only one in the clip shorter than the
+    // tolerance, and an iPhone Xs died at the same second of every run because
+    // of it. Nothing threw, so there was no error to find; the thread was
+    // simply gone, which is why the telemetry stopped mid-report and the tab
+    // was killed as unresponsive a few seconds later while already-scheduled
+    // audio and video kept playing.
+    //
+    // Requiring the time to fall INSIDE the chunk costs nothing at a normal
+    // junction, where mediaT equals rec.t exactly.
     _decodedNear(mediaT) {
         let found = null;
         this.decoded.forEach(function (rec) {
-            if (Math.abs(rec.t - mediaT) <= JOIN_TOL_S) found = rec;
+            if (Math.abs(rec.t - mediaT) <= JOIN_TOL_S && mediaT < rec.t + rec.dur) found = rec;
         });
         return found;
     }
