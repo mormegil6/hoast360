@@ -49,7 +49,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf40';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf41';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -113,15 +113,33 @@ videojs.Html5DashJS.hook('beforeinitialize', function (player, mediaPlayer) {
     // horizontal slice of the equirect, so at the phone's player box the 2880
     // rung still delivers about 0.92 device pixels per screen pixel against
     // 1.22 for the 4K one, and in landscape neither oversupplies.
-    if (!window.MediaSource && window.ManagedMediaSource
-        && mediaPlayer.registerCustomCapabilitiesFilter) {
-        mediaPlayer.registerCustomCapabilitiesFilter(function (representation) {
+    // DEMOTE ON A REAL FAILURE, DO NOT PRE-JUDGE THE DEVICE. An iPhone Xs (A12)
+    // cannot sustain the 4K H.264 rung alongside a WebGL sphere, 16 convolvers
+    // and a WASM Opus worker; it plays, then raises MEDIA_ERR_DECODE or takes
+    // the tab down with it. But every iPhone from the A16 on is also on this
+    // ladder, since none of them decode AV1, and those have the headroom. A
+    // blanket cap by engine would take 4K away from all of them to protect the
+    // oldest, so cap only after the device has actually failed at a rung.
+    //
+    // ABR cannot do this itself: a hard decode error increments no
+    // dropped-frame counter, so DroppedFramesRule never sees it, and dash.js's
+    // recovery resumes at the very same rung and fails again, which is the loop
+    // this breaks. maxBitrate is computed from the rung that failed rather than
+    // hardcoded, so it stays correct across re-encodes.
+    if (mediaPlayer.on) {
+        mediaPlayer.on('error', function (e) {
             try {
-                var codec = (representation && representation.codecs) || '';
-                var width = (representation && representation.width) || 0;
-                if (/^avc1/.test(codec) && width > 2880) return false;
-            } catch (e) { /* keep it if the shape is unexpected */ }
-            return true;
+                var code = e && e.error && e.error.code;
+                if (code !== 3 && !(e && e.event && e.event.code === 3)) return;   // MEDIA_ERR_DECODE
+                var idx = mediaPlayer.getQualityFor('video');
+                var reps = mediaPlayer.getBitrateInfoListFor('video') || [];
+                var bad = reps[idx];
+                if (!bad) return;
+                var ceiling = Math.floor(bad.bitrate / 1000) - 1;   // kbps, just under it
+                console.warn('HOAST360: decode failed at ' + bad.width + 'x' + bad.height
+                    + '; not offering that rung again this session');
+                mediaPlayer.updateSettings({ streaming: { abr: { maxBitrate: { video: ceiling } } } });
+            } catch (err) { /* leave the ladder alone if the shape surprises us */ }
         });
     }
 
@@ -400,6 +418,17 @@ export class HOAST360 {
                 window.location.reload();
             }
         }, STALL_CHECK_INTERVAL_MS);
+    }
+
+    // The shipped zoom matrices are 25x25 (fourth order). Take the leading
+    // block for the order actually being rendered; see the multiplier
+    // construction for why that is exact rather than a truncation.
+    _sliceZoomMtx(mtx) {
+        const n = (this.order + 1) * (this.order + 1);
+        if (!mtx || mtx.length === n) return mtx;
+        const out = new Array(n);
+        for (let r = 0; r < n; r++) out[r] = mtx[r].slice(0, n);
+        return out;
     }
 
     // FULLSCREEN ON IPHONE UNWRAPS THE SPHERE, so replace it with a CSS one.
@@ -1162,8 +1191,19 @@ export class HOAST360 {
         this.rotator = new HOASTRotator(this.context, this.order);
         console.log(this.rotator);
 
-        // initialize matrix multiplier (for now use always 4th order as zoom matrix is in 4th order format)
-        this.multiplier = new MatrixMultiplier(this.context, 4);
+        // BUILD THE ZOOM MATRIX AT THE STREAM'S ORDER, NOT ALWAYS THE FOURTH.
+        // MatrixMultiplier allocates a GainNode per matrix cell, so order 4 is
+        // 625 live nodes plus a 25-way splitter and merger. On a third-order
+        // stream, which is everything this project serves, 369 of those nodes
+        // multiply inputs that do not exist, and every one of them still runs
+        // in the audio graph on every render quantum. That is real work on a
+        // phone already near its limit; an iPhone Xs was crashing its tab on
+        // 2026-08-28.
+        //
+        // Slicing the zoom matrix to the stream's channel count is exact, not
+        // an approximation: the discarded columns multiply absent inputs, and
+        // the discarded rows produce components the decoder never reads.
+        this.multiplier = new MatrixMultiplier(this.context, this.order);
         console.log(this.multiplier);
 
         this.decoder = new HOASTBinDecoder(this.context, this.order);
@@ -1324,7 +1364,7 @@ export class HOAST360 {
         if (zoomFactor >= minZoomfactor && zoomFactor <= maxZoomfactor) {
             let newZoomIndex = Math.round((zoomFactor - minZoomfactor) / stepsize);
             if (newZoomIndex != this.zoomIndex) {
-                this.multiplier.updateMtx(zoomMtx[newZoomIndex]);
+                this.multiplier.updateMtx(this._sliceZoomMtx(zoomMtx[newZoomIndex]));
                 this.zoomIndex = newZoomIndex;
             }
         }

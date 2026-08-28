@@ -6,11 +6,23 @@
     display: block;
 }
 
+/* AN SVG, BECAUSE THE ICON FONT DOES NOT LOAD ON iOS. video.js inlines its
+   glyph font as a data URI typed application/font-woff, a MIME that was
+   deprecated years ago, with no format() hint. Safari refuses it, falls back to
+   a system font, and renders whatever happens to live at U+F110 there: an
+   iPhone Xs showed an unrecognisable shape where the settings gear belongs on
+   2026-08-28. The VR button beside it was always correct because it was already
+   drawn this way. Same glyph, no font dependency. */
+.vjs-http-source-selector .vjs-icon-placeholder {
+    display: inline-block;
+    width: 1.8em;
+    height: 1.8em;
+    background: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgZmlsbD0iI2ZmZiI+PHBhdGggZD0iTTE5LjE0IDEyLjk0Yy4wNC0uMy4wNi0uNjEuMDYtLjk0MC0uMzItLjAyLS42My0uMDctLjk0bDIuMDMtMS41OGEuNDkuNDkgMCAwIDAgLjEyLS42MWwtMS45Mi0zLjMyYS40OS40OSAwIDAgMC0uNTktLjIybC0yLjM5Ljk2YTcuMDMgNy4wMyAwIDAgMC0xLjYyLS45NGwtLjM2LTIuNTRhLjQ4LjQ4IDAgMCAwLS40OC0uNDFoLTMuODRhLjQ4LjQ4IDAgMCAwLS40Ny40MWwtLjM2IDIuNTRjLS41OS4yNC0xLjEzLjU3LTEuNjIuOTRsLTIuMzktLjk2YS40OC40OCAwIDAgMC0uNTkuMjJMMi43NCA4Ljg3YS40OC40OCAwIDAgMCAuMTIuNjFsMi4wMyAxLjU4Yy0uMDUuMzEtLjA5LjYzLS4wOS45NHMuMDIuNjMuMDcuOTRsLTIuMDMgMS41OGEuNDkuNDkgMCAwIDAtLjEyLjYxbDEuOTIgMy4zMmMuMTIuMjIuMzcuMjkuNTkuMjJsMi4zOS0uOTZjLjUuMzggMS4wMy43IDEuNjIuOTRsLjM2IDIuNTRjLjA1LjI0LjI0LjQxLjQ4LjQxaDMuODRjLjI0IDAgLjQ0LS4xNy40Ny0uNDFsLjM2LTIuNTRjLjU5LS4yNCAxLjEzLS41NiAxLjYyLS45NGwyLjM5Ljk2Yy4yMi4wOC40NyAwIC41OS0uMjJsMS45Mi0zLjMyYS40OS40OSAwIDAgMC0uMTItLjYxbC0yLjAxLTEuNTh6TTEyIDE1LjZBMy42IDMuNiAwIDEgMSAxMiA4LjRhMy42IDMuNiAwIDAgMSAwIDcuMnoiLz48L3N2Zz4=) no-repeat center center;
+    background-size: 1.4em 1.4em;
+    vertical-align: middle;
+}
 .vjs-http-source-selector .vjs-icon-placeholder::before {
-    font-family:VideoJS;
-    font-weight:normal;
-    font-style:normal;
-    content:"\f110"
+    content: ""
 }
 
 .video-js .vjs-button-vr .vjs-icon-placeholder {
