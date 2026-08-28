@@ -12,22 +12,19 @@
     position: relative;
 }
 
-/* THE GLYPH IS THE RIGHT ICON, IT WAS ONLY THE WRONG SIZE. video.js gives its
-   own control icons font-size 1.8em and line-height 1.67; the quality selector
-   inherits neither, so its cog rendered noticeably smaller than the buttons
-   beside it. Match those two numbers and nothing else.
+/* SIZE THE ICON video.js ALREADY DRAWS. The selector's button carries
+   video.js's own class vjs-icon-cog, whose stylesheet rule renders the cog. It
+   is simply smaller than the buttons beside it, because those get font-size
+   1.8em and line-height 1.67 from a rule this button does not match.
+   Give it the same two numbers.
 
-   An earlier attempt replaced the glyph with an SVG background on the theory
-   that the icon font was not loading on iOS. It loads. The background merely
-   drew a second icon on top of the first, which is what produced the shapes
-   reported from the device: a big cog over a small one. */
-.vjs-control-bar .vjs-http-source-selector .vjs-icon-placeholder::before {
-    font-family: VideoJS;
-    font-weight: normal;
-    font-style: normal;
+   Do not add a glyph or a background here. Anything drawn on the inner
+   .vjs-icon-placeholder lands ON TOP of the cog that is already there, which is
+   what produced the stacked pairs reported from the device: a large cog over a
+   small one, then a ball, then a ship's wheel. Two elements, two icons. */
+.vjs-control-bar .vjs-http-source-selector .vjs-icon-cog::before {
     font-size: 1.8em;
     line-height: 1.67;
-    content: "\f110"
 }
 
 .video-js .vjs-button-vr .vjs-icon-placeholder {
