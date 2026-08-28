@@ -72,10 +72,28 @@ index c046088..cf8b304 100644
      numSequences = isoFile.getBoxes('moof').length;
      lastSequenceNumber = mfhdBoxes[mfhdBoxes.length - 1].sequence_number;
 diff --git a/node_modules/videojs-contrib-dash/src/js/videojs-dash.js b/node_modules/videojs-contrib-dash/src/js/videojs-dash.js
-index 3160b7e..f398014 100644
+index 3160b7e..79ff0bc 100644
 --- a/node_modules/videojs-contrib-dash/src/js/videojs-dash.js
 +++ b/node_modules/videojs-contrib-dash/src/js/videojs-dash.js
-@@ -432,8 +432,13 @@ videojs.DashSourceHandler.canPlayType = function(type) {
+@@ -156,7 +156,16 @@ class Html5DashJS {
+           message: event.event
+         });
+ 
+-      } else if (event.error === 'download') {
++      } else if (event.error === 'download' || event.error === 'downloadError'
++                 || (event.error && event.error.code === 27)) {
++        // HOAST360 patch: dash.js 2.x reported errors as the STRING 'download';
++        // 4.x passes a DashJSError object whose code 27 is
++        // DOWNLOAD_ERROR_ID_CONTENT_CODE. Matching only the old string made this
++        // whole branch dead code against the dash.js this build runs, so a
++        // stream whose segments all 404 produced no player error and no message:
++        // just an endless spinner. That cost hours on 2026-08-28, when a stale
++        // cached manifest named segments that no longer existed and the only
++        // evidence anywhere was one dash.js warning at a log level nobody sees.
+         this.player.error({
+           code: 2,
+           message: 'The media playback was aborted because too many consecutive ' +
+@@ -432,8 +441,13 @@ videojs.DashSourceHandler.canPlayType = function(type) {
    return '';
  };
  
