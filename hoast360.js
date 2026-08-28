@@ -49,7 +49,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf38';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf39';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -249,6 +249,30 @@ export class HOAST360 {
         this.videoPlayer.__hoast360 = this;
 
         let scope = this;
+        // THE PLAY EVENT IS NOT A USER GESTURE. iOS 13+ grants
+        // DeviceOrientationEvent.requestPermission() only from inside a handler
+        // for a real user interaction, and the 'play' event fires later, on the
+        // engine's own schedule, by which time the gesture is spent. Every
+        // iPhone run on 2026-08-28 logged "Requesting device orientation access
+        // requires a user gesture" and no sensor ever worked, in any mode.
+        // Hook the raw interaction instead, once, and keep the play handler for
+        // engines that need no prompt.
+        const askOrientation = function () {
+            try {
+                if (scope.videoPlayer.usingPlugin('xr')) scope.videoPlayer.xr().enableOrientation();
+            } catch (e) { /* plugin not ready; the next tap tries again */ }
+        };
+        try {
+            const rootEl = this.videoPlayer.el();
+            const once = function () {
+                rootEl.removeEventListener('touchend', once, true);
+                rootEl.removeEventListener('click', once, true);
+                askOrientation();
+            };
+            rootEl.addEventListener('touchend', once, true);
+            rootEl.addEventListener('click', once, true);
+        } catch (e) { /* no element yet */ }
+
         // Intent, not state. A 'pause' EVENT only fires when something asked for
         // a pause; the silent pause dash.js induces while resetting the media
         // source fires nothing, which is what makes this a reliable
@@ -282,11 +306,25 @@ export class HOAST360 {
             // autoplay policy: the context starts suspended; the play click is the
             // user gesture that may resume it. PlaybackEventHandler covers the
             // separate-audio path, but the combined-MPD path has no other resume.
+            // TELL iOS THIS IS PLAYBACK, NOT AMBIENT SOUND. On this player the
+            // video element is muted and every sample comes from Web Audio, and
+            // iOS then treats the page as ambient: the audio session follows the
+            // ringer switch, so a phone on silent renders a running context with
+            // a full gain chain completely inaudible. Measured on an iPhone Xs
+            // on 2026-08-28: masterGain 1.0, context running, the feed
+            // scheduling nodes, and no sound at all in the page, while the same
+            // graph WAS audible inside an immersive session, which iOS gives a
+            // playback session of its own. Safari 16.4 and later expose
+            // navigator.audioSession for exactly this.
+            try {
+                if (navigator.audioSession && navigator.audioSession.type !== 'playback')
+                    navigator.audioSession.type = 'playback';
+            } catch (e) { /* not supported; nothing lost */ }
             if (scope.context.state !== 'running')
                 scope.context.resume();
             scope._watchAudioContextState();
 
-            // same gesture unlocks the iOS 13+ DeviceOrientation permission
+            // Kept for engines that need no permission prompt at all.
             if (scope.videoPlayer.usingPlugin('xr'))
                 scope.videoPlayer.xr().enableOrientation();
         });
