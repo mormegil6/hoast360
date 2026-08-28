@@ -184,9 +184,46 @@ class Xr extends Plugin {
                 this.handleResize_();
             }
         }
-        if (this.getVideoEl_().readyState === this.getVideoEl_().HAVE_ENOUGH_DATA) {
-            if (this.videoTexture) {
-                this.videoTexture.needsUpdate = true;
+        // UPLOAD A FRAME ONLY WHEN THERE IS A NEW ONE. This ran on every
+        // animation frame, so a 60 Hz display re-uploaded 24 fps content 60
+        // times a second. At 3840x1920 RGB8 that is 22.1 MB per upload, about
+        // 1.3 GB/s of texture traffic for 530 MB/s of actual frames, and it is
+        // the largest single load this player puts on a phone. An iPhone Xs
+        // raised MEDIA_ERR_DECODE on the 4K rung after about 34 s on
+        // 2026-08-28 while carrying this plus 16 convolvers and a WASM Opus
+        // worker; the stream itself was measured conformant and well inside
+        // H.264 level 5.1, so the decoder was starved rather than fed
+        // something illegal.
+        //
+        // requestVideoFrameCallback is the exact signal and Safari has had it
+        // since 15.4; where it is missing, the decoded frame counter changes
+        // once per decoded frame and is just as precise. The readyState check
+        // stays: neither source says anything useful before there is data.
+        const vEl = this.getVideoEl_();
+        if (this.videoTexture && vEl.readyState === vEl.HAVE_ENOUGH_DATA) {
+            if (this.frameCallbackSupported_ === undefined) {
+                this.frameCallbackSupported_ = typeof vEl.requestVideoFrameCallback === 'function';
+                if (this.frameCallbackSupported_) {
+                    const markFrame = () => {
+                        this.newVideoFrame_ = true;
+                        if (this.getVideoEl_() === vEl) vEl.requestVideoFrameCallback(markFrame);
+                    };
+                    vEl.requestVideoFrameCallback(markFrame);
+                }
+            }
+            if (this.frameCallbackSupported_) {
+                if (this.newVideoFrame_) {
+                    this.videoTexture.needsUpdate = true;
+                    this.newVideoFrame_ = false;
+                }
+            } else {
+                const n = vEl.webkitDecodedFrameCount;
+                if (n === undefined) {
+                    this.videoTexture.needsUpdate = true;      // no signal; keep the old behaviour
+                } else if (n !== this.lastDecodedFrames_) {
+                    this.lastDecodedFrames_ = n;
+                    this.videoTexture.needsUpdate = true;
+                }
             }
         }
 

@@ -49,7 +49,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf36';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf37';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -249,7 +249,36 @@ export class HOAST360 {
         this.videoPlayer.__hoast360 = this;
 
         let scope = this;
+        // Intent, not state. A 'pause' EVENT only fires when something asked for
+        // a pause; the silent pause dash.js induces while resetting the media
+        // source fires nothing, which is what makes this a reliable
+        // discriminator between the two.
+        this.videoPlayer.on('pause', function () { scope._userPaused = true; });
+        // RESUME AFTER A DECODE-ERROR RESET. dash.js answers MEDIA_ERR_DECODE by
+        // detaching and re-attaching the same MediaSource, and then nothing ever
+        // calls play() again: contrib-dash sets autoplay off, there is no
+        // autoplay attribute, and the reset's own pause fires no event. The
+        // element sits paused at the right time with a full buffer, video.js
+        // sees paused() and hides the control bar behind vjs-has-started, and
+        // the audio feed waits for a 'play' that never comes. That is the
+        // "stuck, no controls, reload fixes it" an iPhone Xs reported on
+        // 2026-08-28. One play() restores all three.
+        this.videoPlayer.on('loadstart', function () {
+            if (!scope._playbackStarted || scope._userPaused) return;
+            if (!scope.videoPlayer.paused()) return;
+            console.warn('HOAST360: source reattached while playing (decode-error '
+                + 'recovery); resuming');
+            const p = scope.videoPlayer.play();
+            // If the engine re-arms the gesture requirement after load(), leave
+            // it to the watchdog rather than trapping the viewer behind a
+            // control bar that is not there.
+            if (p && p.catch) p.catch(function (e) {
+                console.warn('HOAST360: resume after reattach refused: ' + (e && e.name));
+            });
+        });
         this.videoPlayer.on('play', function () {
+            scope._userPaused = false;
+            scope._playbackStarted = true;
             // autoplay policy: the context starts suspended; the play click is the
             // user gesture that may resume it. PlaybackEventHandler covers the
             // separate-audio path, but the combined-MPD path has no other resume.
@@ -289,7 +318,14 @@ export class HOAST360 {
             // behind the user's back would fight that rather than help.
             // The watchdog simply picks back up once the tab is visible.
             if (document.hidden) return;
-            if (scope.videoPlayer.paused()) return;
+            // Only a pause the VIEWER asked for silences the watchdog. dash.js
+            // recovers a decode error by detaching and re-attaching the media
+            // source, and the HTML load algorithm that runs inside that sets
+            // paused=true WITHOUT firing a 'pause' event. So the element ends up
+            // paused with nobody having asked, and the plain paused() guard
+            // switched off the one mechanism built to catch exactly this.
+            if (scope._userPaused) return;
+            if (scope.videoPlayer.paused() && !scope._playbackStarted) return;
             if (Date.now() - scope._lastProgressAt > STALL_RELOAD_MS) {
                 console.warn('HOAST360: no playback progress for ' + STALL_RELOAD_MS
                     + 'ms while playing and visible - reloading to recover');
