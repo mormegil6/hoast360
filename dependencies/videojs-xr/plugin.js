@@ -341,7 +341,18 @@ class Xr extends Plugin {
         // showed no measurable framerate cost against the 16-convolver
         // ambisonic graph running alongside (90 fps sustained either way).
         if (window.__hoastDprCorrect) {
-            this.renderer.setPixelRatio(window.devicePixelRatio || 1);
+            // CAP THE RATIO ON A PHONE. The Quest 3 A/B that justified rendering
+            // at the full device ratio was run on a headset with a GPU to spare;
+            // an iPhone at ratio 3 pays nine fragments per CSS pixel, on a
+            // device that is also decoding 4K video, uploading a 22 MB texture
+            // per frame and running 16 convolvers, and it has been taking its
+            // tab down. Two is the point past which a phone screen returns
+            // almost nothing visible: it still supersamples, at 44% of the
+            // fragment work of three. Desktop and headsets are unaffected,
+            // because their ratios are 1 or 2 already.
+            const raw = window.devicePixelRatio || 1;
+            const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+            this.renderer.setPixelRatio(coarse ? Math.min(raw, 2) : raw);
         }
         this.renderer.setSize(this.player.currentWidth(), this.player.currentHeight());
 

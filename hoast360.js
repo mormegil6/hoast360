@@ -49,7 +49,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf41';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf42';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -137,8 +137,15 @@ videojs.Html5DashJS.hook('beforeinitialize', function (player, mediaPlayer) {
                 if (!bad) return;
                 var ceiling = Math.floor(bad.bitrate / 1000) - 1;   // kbps, just under it
                 console.warn('HOAST360: decode failed at ' + bad.width + 'x' + bad.height
-                    + '; not offering that rung again this session');
+                    + '; keeping ABR below it until the viewer picks it again');
                 mediaPlayer.updateSettings({ streaming: { abr: { maxBitrate: { video: ceiling } } } });
+                // The ceiling binds AUTOMATIC selection only. Picking the rung
+                // from the quality menu clears it (see _wireQualityLevels), so a
+                // device that can in fact manage it is never talked out of it;
+                // this only stops ABR from walking back into a rung that just
+                // failed and failing again, which is a loop the viewer cannot
+                // escape from the menu.
+                if (player.__hoast360) player.__hoast360._abrCeilingKbps = ceiling;
             } catch (err) { /* leave the ladder alone if the shape surprises us */ }
         });
     }
@@ -976,6 +983,7 @@ export class HOAST360 {
     // videojs-contrib-dash does not do on its own). Picking a rung pins dash.js to
     // it; "auto" re-enables dash.js ABR.
     _wireQualityLevels() {
+        let scope = this;
         let player = this.videoPlayer;
         let qualityLevels = player.qualityLevels();
         let wired = false;
@@ -991,6 +999,15 @@ export class HOAST360 {
                     if (qualityLevels[i].enabled) on.push(i);
                 // all (or none) enabled -> dash.js ABR ("auto"); exactly one -> pin it
                 let auto = (on.length === 0 || on.length === qualityLevels.length);
+                // AN EXPLICIT PICK OUTRANKS THE AUTOMATIC CEILING. If a decode
+                // error lowered the ABR ceiling and the viewer then chooses that
+                // rung anyway, honour it: the ceiling exists to stop ABR
+                // looping through a failure, not to overrule a person who can
+                // see the picture and decide for themselves.
+                if (!auto && scope._abrCeilingKbps) {
+                    mp.updateSettings({ streaming: { abr: { maxBitrate: { video: -1 } } } });
+                    scope._abrCeilingKbps = 0;
+                }
                 mp.updateSettings({ streaming: { abr: { autoSwitchBitrate: { video: auto } } } });
                 if (!auto) {
                     mp.setQualityFor('video', on[on.length - 1], true);

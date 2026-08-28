@@ -13,13 +13,24 @@
    iPhone Xs showed an unrecognisable shape where the settings gear belongs on
    2026-08-28. The VR button beside it was always correct because it was already
    drawn this way. Same glyph, no font dependency. */
+.video-js .vjs-http-source-selector {
+    position: relative;
+}
 .vjs-http-source-selector .vjs-icon-placeholder {
-    display: inline-block;
-    width: 1.8em;
-    height: 1.8em;
+    /* Absolute inside the button rather than sized in em: the placeholder is an
+       inline span whose height comes from line-height, so a background on it
+       rode high in the bar and looked like a superscript next to the font
+       glyphs beside it. */
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
     background: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgZmlsbD0iI2ZmZiI+PHBhdGggZD0iTTE5LjE0IDEyLjk0Yy4wNC0uMy4wNi0uNjEuMDYtLjk0MC0uMzItLjAyLS42My0uMDctLjk0bDIuMDMtMS41OGEuNDkuNDkgMCAwIDAgLjEyLS42MWwtMS45Mi0zLjMyYS40OS40OSAwIDAgMC0uNTktLjIybC0yLjM5Ljk2YTcuMDMgNy4wMyAwIDAgMC0xLjYyLS45NGwtLjM2LTIuNTRhLjQ4LjQ4IDAgMCAwLS40OC0uNDFoLTMuODRhLjQ4LjQ4IDAgMCAwLS40Ny40MWwtLjM2IDIuNTRjLS41OS4yNC0xLjEzLjU3LTEuNjIuOTRsLTIuMzktLjk2YS40OC40OCAwIDAgMC0uNTkuMjJMMi43NCA4Ljg3YS40OC40OCAwIDAgMCAuMTIuNjFsMi4wMyAxLjU4Yy0uMDUuMzEtLjA5LjYzLS4wOS45NHMuMDIuNjMuMDcuOTRsLTIuMDMgMS41OGEuNDkuNDkgMCAwIDAtLjEyLjYxbDEuOTIgMy4zMmMuMTIuMjIuMzcuMjkuNTkuMjJsMi4zOS0uOTZjLjUuMzggMS4wMy43IDEuNjIuOTRsLjM2IDIuNTRjLjA1LjI0LjI0LjQxLjQ4LjQxaDMuODRjLjI0IDAgLjQ0LS4xNy40Ny0uNDFsLjM2LTIuNTRjLjU5LS4yNCAxLjEzLS41NiAxLjYyLS45NGwyLjM5Ljk2Yy4yMi4wOC40NyAwIC41OS0uMjJsMS45Mi0zLjMyYS40OS40OSAwIDAgMC0uMTItLjYxbC0yLjAxLTEuNTh6TTEyIDE1LjZBMy42IDMuNiAwIDEgMSAxMiA4LjRhMy42IDMuNiAwIDAgMSAwIDcuMnoiLz48L3N2Zz4=) no-repeat center center;
-    background-size: 1.4em 1.4em;
-    vertical-align: middle;
+    /* Fill the button cell and centre the glyph in it, the way video.js's own
+       font icons sit. Sizing the box in em and leaving it inline made it hang
+       off the top of the bar like a superscript. */
+    background-size: 1.7em 1.7em;
 }
 .vjs-http-source-selector .vjs-icon-placeholder::before {
     content: ""
