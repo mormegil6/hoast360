@@ -49,7 +49,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf33';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf34';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -255,6 +255,7 @@ export class HOAST360 {
             // separate-audio path, but the combined-MPD path has no other resume.
             if (scope.context.state !== 'running')
                 scope.context.resume();
+            scope._watchAudioContextState();
 
             // same gesture unlocks the iOS 13+ DeviceOrientation permission
             if (scope.videoPlayer.usingPlugin('xr'))
@@ -295,6 +296,105 @@ export class HOAST360 {
                 window.location.reload();
             }
         }, STALL_CHECK_INTERVAL_MS);
+    }
+
+    // FULLSCREEN ON IPHONE UNWRAPS THE SPHERE, so replace it with a CSS one.
+    // Safari on iPhone exposes fullscreen only on a video element (iPad does
+    // support Element.requestFullscreen, hence the capability test rather than
+    // a user-agent one), and video.js therefore falls back to the element's
+    // native fullscreen. That is the system player: it plays the equirect frame
+    // flat and never paints the WebGL canvas the sphere lives on, which is what
+    // an iPhone Xs showed on 2026-08-28. Expanding the player container instead
+    // keeps the canvas, the projection and the controls, at the cost of the
+    // browser chrome staying on screen.
+    _installPseudoFullscreen() {
+        if (this._pseudoFsInstalled) return;
+        const canElementFullscreen = !!(document.fullscreenEnabled
+            || document.webkitFullscreenEnabled || document.mozFullScreenEnabled);
+        if (canElementFullscreen) return;      // real fullscreen works here
+        const player = this.videoPlayer;
+        const root = player.el && player.el();
+        if (!root) return;
+        this._pseudoFsInstalled = true;
+        const settle = function () {
+            // The XR plugin resizes its renderer from a window resize event and
+            // reads the player's box, so the class has to be applied first.
+            try { window.dispatchEvent(new Event('resize')); } catch (e) { /* older engines */ }
+            setTimeout(function () {
+                try { window.dispatchEvent(new Event('resize')); } catch (e) { /* ignore */ }
+            }, 120);
+        };
+        // Read the state back off the DOM rather than video.js's own flag.
+        // The flag is authoritative about the BROWSER's fullscreen, which we are
+        // deliberately not using, and setting it did not survive: the toggle
+        // then read false while the player was expanded, so a second tap
+        // re-entered instead of exiting. The class is the truth here.
+        const origIsFullscreen = player.isFullscreen.bind(player);
+        player.isFullscreen = function (value) {
+            if (value === undefined) return root.classList.contains('hoast-pseudo-fs');
+            return origIsFullscreen(value);
+        };
+        player.requestFullscreen = function () {
+            root.classList.add('hoast-pseudo-fs');
+            // vjs-fullscreen is what video.js's own stylesheet keys the exit
+            // icon and the fullscreen layout off, so the control looks right.
+            player.addClass('vjs-fullscreen');
+            document.documentElement.classList.add('hoast-pseudo-fs-lock');
+            player.trigger('fullscreenchange');
+            settle();
+            return Promise.resolve();
+        };
+        player.exitFullscreen = function () {
+            root.classList.remove('hoast-pseudo-fs');
+            player.removeClass('vjs-fullscreen');
+            document.documentElement.classList.remove('hoast-pseudo-fs-lock');
+            player.trigger('fullscreenchange');
+            settle();
+            return Promise.resolve();
+        };
+        console.log('HOAST360: element fullscreen unavailable; using the CSS '
+            + 'fullscreen that keeps the 360 view');
+    }
+
+    // iOS HAS A THIRD AudioContext STATE, AND IT IS NOT 'suspended'.
+    // WebKit parks a context at 'interrupted' when the system takes audio away
+    // (a call, another app, screen lock) and, as measured on an iPhone Xs on
+    // 2026-08-28, after a pause: beacon run to3fjf reported state 'interrupted'
+    // while the element sat paused. Nothing in the player watched for that, so
+    // audio came back only when the next 'play' happened to run the resume in
+    // the play handler, which is the few seconds of silence after resuming.
+    //
+    // An interruption also invalidates what the feed has already scheduled:
+    // its AudioBufferSourceNodes are anchored to a context clock that stopped.
+    // Resuming the context alone would leave the graph running against a dead
+    // anchor, so the feed is pushed back through its stalled path, which is the
+    // one route that rebuilds and re-anchors from scratch.
+    _watchAudioContextState() {
+        if (this._ctxWatch || !this.context || !this.context.addEventListener) return;
+        this._ctxWatch = true;
+        const scope = this;
+        this.context.addEventListener('statechange', function () {
+            const st = scope.context.state;
+            if (st === 'running') return;
+            const el = scope.videoPlayer && scope.videoPlayer.el
+                ? scope.videoPlayer.el().querySelector('video') : null;
+            // Only fight for the context while the viewer expects sound. A
+            // deliberate pause should stay quiet, and resuming a context the
+            // system suspended on purpose can be refused anyway.
+            if (!el || el.paused) return;
+            console.log('HOAST360: AudioContext went ' + st + ' during playback; resuming');
+            const p = scope.context.resume();
+            const after = function () {
+                const f = scope.audioFeed;
+                if (!f) return;
+                // Force the rebuild path rather than the idempotent one: the
+                // chain that was scheduled before the interruption is anchored
+                // to a clock that no longer advances.
+                if (f.state === 'running') f.state = 'stalled';
+                if (typeof f._resume === 'function') f._resume();
+            };
+            if (p && p.then) p.then(after, function () { /* refused; next play retries */ }); else after();
+        });
     }
 
     async initialize(newMediaUrl, newIrUrl, newOrder) {
@@ -649,6 +749,25 @@ export class HOAST360 {
                     vel.setAttribute('playsinline', '');
                     vel.setAttribute('webkit-playsinline', '');
                 }
+                // THE VOLUME CONTROL ASKS THE WRONG ELEMENT ON iOS. video.js
+                // decides whether to show it from Html5.canControlVolume(),
+                // which probes whether setting a video element's .volume
+                // sticks. On iOS it does not, so the panel is hidden and the
+                // iPhone Xs run on 2026-08-28 had a control that could not be
+                // tapped. That probe is correct about the element and
+                // irrelevant here: on the WASM feed the element is muted and
+                // every audible sample comes from masterGain in Web Audio,
+                // which the existing volumechange handler already drives. So
+                // re-enable the control on the feed path only, where our own
+                // gain node is what the slider actually moves.
+                if (this._feedBackend === 'wasm') {
+                    const tech = this.videoPlayer.tech({ IWillNotUseThisInPlugins: true });
+                    if (tech) tech.featuresVolumeControl = true;
+                    const cb = this.videoPlayer.controlBar;
+                    const vp = cb && cb.volumePanel;
+                    if (vp && vp.removeClass) vp.removeClass('vjs-hidden');
+                }
+                this._installPseudoFullscreen();
             } catch (e) { /* tech not ready; dash.js will surface the failure */ }
             this.videoPlayer.src({ type: 'application/dash+xml', src: this.mediaUrl });
             this._wireQualityLevels();

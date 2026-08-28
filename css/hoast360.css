@@ -23,3 +23,30 @@
 .vjs-button-vr .vjs-icon-placeholder::before {
     content:""
 }
+/* PSEUDO-FULLSCREEN FOR IPHONE. Safari on iPhone supports fullscreen only for
+   a video element, never for an arbitrary element, so video.js falls back to
+   the element's own native fullscreen. That hands playback to the system
+   player, which shows the raw equirectangular frame and paints nothing from
+   the WebGL canvas: the sphere disappears and the viewer sees an unwrapped
+   panorama, reported from an iPhone Xs on 2026-08-28. Expanding the player
+   container with CSS instead keeps the canvas, the sphere and the controls.
+   Fixed positioning against the layout viewport rather than 100vh, which on
+   iOS Safari measures the viewport WITHOUT the browser chrome and so overflows
+   by the toolbar height. */
+.hoast-pseudo-fs {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: none !important;
+    z-index: 2147483647;
+    background: #000;
+}
+html.hoast-pseudo-fs-lock,
+html.hoast-pseudo-fs-lock body {
+    overflow: hidden !important;
+    overscroll-behavior: none;
+}
