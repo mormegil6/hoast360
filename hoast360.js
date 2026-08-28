@@ -49,7 +49,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf42';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf43';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -332,6 +332,38 @@ export class HOAST360 {
         // a pause; the silent pause dash.js induces while resetting the media
         // source fires nothing, which is what makes this a reliable
         // discriminator between the two.
+        // KEEP THE SCREEN ON WHILE PLAYING. iOS keeps the display awake for a
+        // video that is playing audio, and this element is muted by design
+        // because the real audio comes from Web Audio, so the phone treats a
+        // 360 session as an idle page and locks the screen under the viewer.
+        // Reported from an iPhone Xs on 2026-08-28, where it also corrupted
+        // every stability measurement: a locked screen suspends media, so the
+        // clock stops for reasons that have nothing to do with the player.
+        // The lock is dropped whenever the page hides, so it has to be taken
+        // again on the way back.
+        const wake = { lock: null };
+        const takeWakeLock = function () {
+            try {
+                if (!navigator.wakeLock || wake.lock || document.hidden) return;
+                navigator.wakeLock.request('screen').then(function (l) {
+                    wake.lock = l;
+                    l.addEventListener('release', function () { wake.lock = null; });
+                }, function (e) {
+                    console.log('HOAST360: screen wake lock refused (' + (e && e.name) + ')');
+                });
+            } catch (e) { /* not supported; the screen will sleep as before */ }
+        };
+        const dropWakeLock = function () {
+            try { if (wake.lock) { wake.lock.release(); wake.lock = null; } } catch (e) { /* already gone */ }
+        };
+        this.videoPlayer.on('playing', takeWakeLock);
+        this.videoPlayer.on('pause', dropWakeLock);
+        this.videoPlayer.on('ended', dropWakeLock);
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) return;
+            if (scope.videoPlayer && !scope.videoPlayer.paused()) takeWakeLock();
+        });
+
         this.videoPlayer.on('pause', function () { scope._userPaused = true; });
         // RESUME AFTER A DECODE-ERROR RESET. dash.js answers MEDIA_ERR_DECODE by
         // detaching and re-attaching the same MediaSource, and then nothing ever
