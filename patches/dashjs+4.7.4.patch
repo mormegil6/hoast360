@@ -1,5 +1,5 @@
 diff --git a/node_modules/dashjs/dist/dash.all.debug.js b/node_modules/dashjs/dist/dash.all.debug.js
-index 4ecc55a..cc753c5 100644
+index 4ecc55a..f4fdbff 100644
 --- a/node_modules/dashjs/dist/dash.all.debug.js
 +++ b/node_modules/dashjs/dist/dash.all.debug.js
 @@ -14173,7 +14173,18 @@ function TimelineSegmentsGetter(config, isDynamic) {
@@ -38,7 +38,34 @@ index 4ecc55a..cc753c5 100644
      var list = base.SegmentURL_asArray;
      var time = 0;
      var relativeIdx = -1;
-@@ -52826,6 +52844,14 @@ function TextSourceBuffer(config) {
+@@ -29122,15 +29140,21 @@ function MediaSourceController() {
+     var hasMediaSource = ('MediaSource' in window);
+     var hasManagedMediaSource = ('ManagedMediaSource' in window);
+ 
+-    if (hasManagedMediaSource) {
++    // HOAST360 patch: prefer plain MediaSource over ManagedMediaSource when
++    // both exist (macOS Safari 26+). Upstream prefers MMS unconditionally, and
++    // real Safari 27 then never fires sourceopen for this player (readyState
++    // stuck at 0, measured 2026-08-28), while the plain-MSE path is the one
++    // this player shipped on for weeks. MMS remains for the engines that have
++    // nothing else - iPhone - where disableRemotePlayback is set early.
++    if (hasMediaSource) {
++      mediaSource = new MediaSource();
++      mediaSourceType = 'mediaSource';
++      logger.info("Created MediaSource");
++    } else if (hasManagedMediaSource) {
+       // eslint-disable-next-line no-undef
+       mediaSource = new ManagedMediaSource();
+       mediaSourceType = 'managedMediaSource';
+       logger.info("Created ManagedMediaSource");
+-    } else if (hasMediaSource) {
+-      mediaSource = new MediaSource();
+-      mediaSourceType = 'mediaSource';
+-      logger.info("Created MediaSource");
+     } else if (hasWebKit) {
+       mediaSource = new WebKitMediaSource();
+       logger.info("Created WebkitMediaSource");
+@@ -52826,6 +52850,14 @@ function TextSourceBuffer(config) {
        }
  
        samplesInfo = boxParser.getSamplesInfo(bytes);
@@ -53,7 +80,7 @@ index 4ecc55a..cc753c5 100644
        var sequenceNumber = samplesInfo.lastSequenceNumber;
        var chunkStart = Math.trunc(chunk.start);
        var chunkEnd = Math.trunc(chunk.end);
-@@ -54982,6 +55008,19 @@ function BoxParser() {
+@@ -54982,6 +55014,19 @@ function BoxParser() {
      var moofBoxes = isoFile.getBoxes('moof'); // exactly one mfhd per moof
  
      var mfhdBoxes = isoFile.getBoxes('mfhd');
