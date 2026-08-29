@@ -49,7 +49,7 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf50';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
+const BUILD_TAG = 'rf51';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
                             // any bundle change: it is the only build marker
                             // visible in a deployed player, and 'is this the new
                             // bundle?' cost real time on 2026-08-08 without it.
@@ -332,6 +332,21 @@ export class HOAST360 {
         // a pause; the silent pause dash.js induces while resetting the media
         // source fires nothing, which is what makes this a reliable
         // discriminator between the two.
+        // CLOSE THE AUDIO CONTEXT WHEN THE PAGE GOES AWAY. WebKit allows only a
+        // few concurrent AudioContexts per process, and a context that is never
+        // closed is not reclaimed when the page is merely reloaded: after two
+        // or three reloads a new one starts but produces no sound, and only
+        // quitting Safari clears it. Reported from an iPhone Xs on 2026-08-28,
+        // where reloading twice reliably produced a silent player and killing
+        // Safari reliably fixed it.
+        //
+        // pagehide rather than unload, because iOS does not fire unload
+        // reliably and pagehide is the event WebKit guarantees.
+        window.addEventListener('pagehide', function () {
+            try { if (scope.context && scope.context.state !== 'closed') scope.context.close(); }
+            catch (e) { /* already gone */ }
+        });
+
         // KEEP THE SCREEN ON WHILE PLAYING. iOS keeps the display awake for a
         // video that is playing audio, and this element is muted by design
         // because the real audio comes from Web Audio, so the phone treats a
