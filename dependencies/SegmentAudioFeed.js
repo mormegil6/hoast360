@@ -931,6 +931,32 @@ export default class SegmentAudioFeed {
         if (this.pumpCount % 10 === 1)
             this.outputLatency = this.ctx.outputLatency || this.ctx.baseLatency || 0;
 
+        // WATCH THE CLOCK ITSELF FOR A JUMP BACKWARDS. Every rebuild until now
+        // hung off the element's 'seeking' and 'seeked' events, and the rewind
+        // an element performs for its own loop attribute does not reliably fire
+        // them. So at the wrap the media clock returned to zero while the feed
+        // went on waiting to place audio near the end of the clip, and there was
+        // silence for the whole of the second pass: reported on an iPhone Xs on
+        // 2026-08-29, where the picture looped correctly and the sound did not
+        // come back until the page was reloaded.
+        //
+        // Detected from the clock rather than from any event, so it covers the
+        // loop rewind, an engine that omits the events, and anything else that
+        // moves the playhead behind our back. The threshold is well above
+        // ordinary jitter and below any real seek.
+        const nowT = el.currentTime;
+        if (this._lastPumpT !== undefined && nowT < this._lastPumpT - 0.5 && !el.seeking) {
+            this.counters.resyncs++;
+            console.log('SegmentAudioFeed: clock jumped back ' + (this._lastPumpT - nowT).toFixed(2)
+                + 's with no seek event (loop rewind); rebuilding');
+            this._flush(0);
+            if (this.state === 'running') this.state = 'stalled';
+            this._lastPumpT = nowT;
+            if (!el.paused) this._resume();
+        } else {
+            this._lastPumpT = nowT;
+        }
+
         // A paused element loads nothing on either route, so paused time must
         // not count against the no-fragments watchdog: pressing play in a tab
         // that sat idle degraded the feed instantly (2026-08-25).
