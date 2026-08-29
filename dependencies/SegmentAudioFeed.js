@@ -322,7 +322,13 @@ export default class SegmentAudioFeed {
             self._on(el, 'pause', function () { self._enterPaused(); });
             self._on(el, 'play', function () { self._resume(); });
             self._on(el, 'playing', function () { self._resume(); });
-            self._on(el, 'seeking', function () { self._flush(RAMP_S); self.state = self.state === 'paused' ? 'paused' : 'stalled'; });
+            self._on(el, 'seeking', function () {
+                // A seek can land anywhere, including on content whose decoded
+                // chunks were pruned and whose fetch keys are still held.
+                self._forgetFetched();
+                self._flush(RAMP_S);
+                self.state = self.state === 'paused' ? 'paused' : 'stalled';
+            });
             self._on(el, 'seeked', function () {
                 if (self._seekTimer) clearTimeout(self._seekTimer);
                 // debounced: GapController can emit bursts of micro-jumps
@@ -609,6 +615,23 @@ export default class SegmentAudioFeed {
         if (!m) return;
         const n = parseInt(m[1], 10) + this._sf.dN;
         this._sfFetch(n, r.startTime, r.duration);
+    }
+
+    // FORGET WHAT WE HAVE ALREADY ASKED FOR. _sfFetched exists so a segment
+    // that will never arrive is not requested on every sweep, but it also means
+    // a segment fetched once is never fetched again. That is fine going
+    // forward, and wrong the moment the clock moves back: after the loop wrap
+    // the feed needs audio near zero, those chunks were pruned an hour of media
+    // ago, and the fetcher declined to ask for them because their keys were
+    // still in the set. The feed then sat in state "running" with no anchor and
+    // no scheduled nodes, which is silence that looks healthy from outside.
+    // Measured on an iPhone Xs on 2026-08-29: after the wrap, nodes 0,
+    // nextT null, anchor null, and no sound for the whole second pass.
+    _forgetFetched() {
+        const before = this._sfFetched.size;
+        this._sfFetched.clear();
+        if (before) console.log('SegmentAudioFeed: cleared ' + before
+            + ' fetch keys after a discontinuity');
     }
 
     _sfFetch(n, t, dur) {
@@ -949,6 +972,7 @@ export default class SegmentAudioFeed {
             this.counters.resyncs++;
             console.log('SegmentAudioFeed: clock jumped back ' + (this._lastPumpT - nowT).toFixed(2)
                 + 's with no seek event (loop rewind); rebuilding');
+            this._forgetFetched();
             this._flush(0);
             if (this.state === 'running') this.state = 'stalled';
             this._lastPumpT = nowT;
