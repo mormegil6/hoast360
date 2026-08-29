@@ -607,6 +607,20 @@ export default class SegmentAudioFeed {
         }
         for (let n = n0; n <= n1; n++)
             this._sfFetch(n, sf.p0 + (n - sf.aStart) * sf.segDur, sf.segDur);
+
+        // PRE-ROLL THE START WHILE A LOOPING CLIP RUNS OUT. At the wrap the feed
+        // needs audio from zero, and it will not anchor until it holds
+        // MIN_START_AHEAD_S of contiguous decoded content, so fetching only
+        // after the wrap costs a couple of seconds of silence at the top of
+        // every pass. Heard on an iPhone Xs on 2026-08-29. Fetch the opening
+        // segments during the last stretch instead, so the content is already
+        // there when the clock comes back.
+        if (elDur !== null && elForDur.loop && elDur - elT < HORIZON_S) {
+            const wrapNeed = HORIZON_S - (elDur - elT);
+            const nEnd = sf.aStart + Math.floor(wrapNeed / sf.segDur);
+            for (let n = sf.aStart; n <= nEnd; n++)
+                this._sfFetch(n, sf.p0 + (n - sf.aStart) * sf.segDur, sf.segDur);
+        }
     }
 
     _sfOnVideoFrag(r) {
@@ -1413,7 +1427,14 @@ export default class SegmentAudioFeed {
         });
         // decoded chunks: behind the playhead or far ahead
         const dead = [];
+        // Keep the opening chunks while a looping clip runs out; they were
+        // fetched deliberately for the wrap and pruning them here would undo
+        // the pre-roll above on the very pass that needs it.
+        const el2 = this.getElement();
+        const keepHead = !!(el2 && el2.loop && isFinite(el2.duration) && el2.duration > 0
+                            && el2.duration - playhead < HORIZON_S);
         this.decoded.forEach(function (rec, key) {
+            if (keepHead && rec.t < HORIZON_S) return;
             if (rec.t + rec.dur < playhead - 1 || rec.t > playhead + HORIZON_S + 10) dead.push(key);
         });
         const self = this;
