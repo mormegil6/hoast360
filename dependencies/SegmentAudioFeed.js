@@ -618,6 +618,19 @@ export default class SegmentAudioFeed {
         if (elDur !== null && elForDur.loop && elDur - elT < HORIZON_S) {
             const wrapNeed = HORIZON_S - (elDur - elT);
             const nEnd = sf.aStart + Math.floor(wrapNeed / sf.segDur);
+            // The opening segments were fetched at the start of THIS pass, so
+            // their keys are still held and the fetch below would skip them: the
+            // pre-roll would then do nothing on the first wrap, which is what
+            // the device measured, 4.4 s of silence at the first wrap against
+            // 0.8 s at the second. Release just those keys, once per run-out,
+            // so the content is really fetched again before the clock comes
+            // back. The flag is cleared with the rest at the wrap.
+            const runOutKey = this.epoch + ':runout';
+            if (this._preRolledFor !== runOutKey) {
+                this._preRolledFor = runOutKey;
+                for (let n = sf.aStart; n <= nEnd; n++)
+                    this._sfFetched.delete(this.epoch + ':' + n);
+            }
             for (let n = sf.aStart; n <= nEnd; n++)
                 this._sfFetch(n, sf.p0 + (n - sf.aStart) * sf.segDur, sf.segDur);
         }
@@ -644,6 +657,7 @@ export default class SegmentAudioFeed {
     _forgetFetched() {
         const before = this._sfFetched.size;
         this._sfFetched.clear();
+        this._preRolledFor = null;   // the next run-out pre-rolls again
         if (before) console.log('SegmentAudioFeed: cleared ' + before
             + ' fetch keys after a discontinuity');
     }
