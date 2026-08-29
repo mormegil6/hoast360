@@ -509,10 +509,22 @@ export default class SegmentAudioFeed {
             // numbers collide with the old run's dedup keys and are skipped
             // silently until the numbering passes the old high-water mark -
             // minutes of total silence after a restart.
-            if (prevSf && (prevSf.aStart !== next.aStart
-                           || Math.abs((prevSf.p0 || 0) - (next.p0 || 0)) > 0.5)) {
+            //
+            // TESTED ON THE MAPPING, NOT ON THE WINDOW. A live window advances
+            // startNumber and its first segment's time on every refresh - this
+            // box publishes type="dynamic" with minimumUpdatePeriod PT2S - so
+            // comparing aStart/p0 for change fired on every ordinary slide.
+            // Measured on an iPhone Xs (probe wsa46k): 5 bumps in 123 s of
+            // healthy playback, each one stranding the whole encoded ring,
+            // because _prune deliberately never age-prunes across a
+            // discontinuity. What actually distinguishes a restart is that the
+            // SAME segment number maps to a DIFFERENT presentation time.
+            if (self._isRebased(prevSf, next)) {
                 self.epoch++;
                 self.counters.epochBumps++;
+                // read by _strike() to tell restart debris from a decoder
+                // problem; it was never assigned, so that window never applied
+                self._lastEpochBumpAt = performance.now();
                 self._sfFetched.clear();
             }
             self._sf = next;
@@ -748,6 +760,7 @@ export default class SegmentAudioFeed {
                 // element itself rebases
                 this.epoch++;
                 this.counters.epochBumps++;
+                this._lastEpochBumpAt = performance.now();
             }
             this.inits.set(rep, { bytes: bytes, epoch: this.epoch, timecodeScale: this._parseTimecodeScale(bytes) });
             return;
@@ -957,6 +970,34 @@ export default class SegmentAudioFeed {
             out.copyToChannel(tmp, c, 0);
         }
         this.decoded.set(key, { t: tEff, dur: (span - preSmp) / sr, preS: preSmp / sr, buffer: out, lastUse: performance.now() });
+    }
+
+    // True only for a timeline that was REBASED, i.e. one where segment
+    // numbering no longer means what it did: numbering went backwards, a shared
+    // number moved in presentation time, or the windows no longer overlap at
+    // all. A window that merely slid forward is the normal live case and must
+    // NOT bump the epoch. Manifests with no SegmentTimeline (@duration grids)
+    // have no mapping to compare, so they keep the original window test.
+    _isRebased(prevSf, next) {
+        if (!prevSf) return false;
+        const a = prevSf.segs, b = next.segs;
+        if (!a || !a.length || !b || !b.length)
+            return prevSf.aStart !== next.aStart
+                || Math.abs((prevSf.p0 || 0) - (next.p0 || 0)) > 0.5;
+        if (next.aStart < prevSf.aStart) return true;
+        const was = new Map();
+        for (let i = 0; i < a.length; i++) was.set(a[i].n, a[i].t);
+        let shared = 0;
+        for (let i = 0; i < b.length; i++) {
+            const t0 = was.get(b[i].n);
+            if (t0 === undefined) continue;
+            shared++;
+            if (Math.abs(t0 - b[i].t) > 0.5) return true;
+        }
+        // No shared numbering at all. Either a restart, or a gap longer than the
+        // whole time-shift window (a backgrounded tab). Both are discontinuities
+        // as far as the decoded chain is concerned.
+        return shared === 0;
     }
 
     _strike() {
@@ -1435,8 +1476,25 @@ export default class SegmentAudioFeed {
         const lo = playhead - RING_BACK_S, hi = playhead + RING_AHEAD_S;
         const curEpochs = {};
         curEpochs[this.epoch] = true;
+        // BOUNDED, not exempt. Entries from a previous epoch stay playable while
+        // the element finishes crossing the discontinuity, but they used to be
+        // exempt from age-pruning outright, and each one retains its compressed
+        // bytes (~312 kB per audio segment here). One bump therefore leaked the
+        // whole ring for the rest of the session. Keep the epoch immediately
+        // before this one, and only the newest STALE_KEEP entries of it;
+        // anything older can no longer be reached by a playhead that has moved on.
+        const prevEpoch = this.epoch - 1;
+        const STALE_KEEP = 8;
+        let staleTotal = 0;
+        for (let i = 0; i < this.ring.length; i++)
+            if (this.ring[i].epoch === prevEpoch) staleTotal++;
+        // the ring is time-ascending, so "newest" is the tail of that run
+        let staleSeen = 0;
         this.ring = this.ring.filter(function (c) {
-            if (!curEpochs[c.epoch]) return true; // never age-prune across a discontinuity
+            if (!curEpochs[c.epoch]) {
+                if (c.epoch !== prevEpoch) return false;
+                return ++staleSeen > staleTotal - STALE_KEEP;
+            }
             return (c.t + c.dur) >= lo && c.t <= hi;
         });
         // decoded chunks: behind the playhead or far ahead
