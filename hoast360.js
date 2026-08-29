@@ -332,17 +332,31 @@ export class HOAST360 {
         // a pause; the silent pause dash.js induces while resetting the media
         // source fires nothing, which is what makes this a reliable
         // discriminator between the two.
-        // CLOSE THE AUDIO CONTEXT WHEN THE PAGE GOES AWAY. WebKit allows only a
-        // few concurrent AudioContexts per process, and a context that is never
-        // closed is not reclaimed when the page is merely reloaded: after two
-        // or three reloads a new one starts but produces no sound, and only
-        // quitting Safari clears it. Reported from an iPhone Xs on 2026-08-28,
-        // where reloading twice reliably produced a silent player and killing
-        // Safari reliably fixed it.
-        //
-        // pagehide rather than unload, because iOS does not fire unload
+        // CLOSE THE AUDIO CONTEXT WHEN THE PAGE GOES AWAY. Hygiene, and nothing
+        // more: it releases the context rather than leaving it for a reload to
+        // inherit. pagehide rather than unload, because iOS does not fire unload
         // reliably and pagehide is the event WebKit guarantees.
+        //
+        // THIS DOES NOT FIX THE SILENT-PLAYER BUG, whatever the 2026-08-28 note
+        // that introduced it said. That note read the silence as unreclaimed
+        // contexts hitting WebKit's per-process limit. Instrumented on an iPhone
+        // Xs on 2026-08-29 (probes cu4p85, c7f0dl, nyxueu), it is not:
+        //   - a silent process still builds 6 realtime AudioContexts, all of
+        //     which report 'running' with a 9 ms outputLatency, so no limit is
+        //     being hit;
+        //   - a plain <audio> element is silent there too, playing a 0.6 s beep
+        //     to completion with currentTime advanced, one played range and no
+        //     error, so the loss is below Web Audio entirely;
+        //   - the silence outlives closing this context AND the page reload that
+        //     follows it, and clears only when Safari's process is killed.
+        // It is a WebKit fault in the content process's audio output, and the
+        // page can neither detect nor repair it. Keep the close for hygiene, and
+        // do not let it be read as a cure. ?noclose=1 disables it for testing.
+        // See docs/IOS-SAFARI.md.
+        let skipClose = false;
+        try { skipClose = /[?&]noclose=1/.test(window.location.search); } catch (e) { /* no location */ }
         window.addEventListener('pagehide', function () {
+            if (skipClose) return;
             try { if (scope.context && scope.context.state !== 'closed') scope.context.close(); }
             catch (e) { /* already gone */ }
         });
@@ -449,8 +463,20 @@ export class HOAST360 {
         // PLAYBACK_STALLED/BUFFER_EMPTY events - those fire, and clear,
         // constantly under normal network jitter.
         this._lastProgressAt = Date.now();
+        this._lastProgressT = null;
         this.videoPlayer.on('timeupdate', function () {
-            scope._lastProgressAt = Date.now();
+            // THE EVENT IS NOT THE PROGRESS. dash.js's teardown calls
+            // element.load(), and the HTML load algorithm fires a timeupdate
+            // while it zeroes the clock, so refreshing on the event alone let
+            // the collapse itself re-arm the watchdog that exists to catch it.
+            // Refresh only when the clock actually moved.
+            const el = scope.videoPlayer.el
+                ? scope.videoPlayer.el().querySelector('video') : null;
+            const t = el ? el.currentTime : null;
+            if (t === null || t !== scope._lastProgressT) {
+                scope._lastProgressT = t;
+                scope._lastProgressAt = Date.now();
+            }
         });
         setInterval(function () {
             // A hidden tab is expected to stall - browsers throttle or
@@ -466,12 +492,55 @@ export class HOAST360 {
             // switched off the one mechanism built to catch exactly this.
             if (scope._userPaused) return;
             if (scope.videoPlayer.paused() && !scope._playbackStarted) return;
+            // A TORN-DOWN SESSION IS NOT A STALL, and waiting out the stall
+            // timer for it costs a minute of dead air. dash.js's error path
+            // ends in StreamController.reset(), which detaches the source and
+            // leaves the element at readyState 0 with an empty buffer - a state
+            // a healthy element never sits in once playback has started.
+            // Measured on an iPhone Xs (probe rhr9k0): the element collapsed at
+            // t=21 s and was still dead 66 s later, with the stall reload not
+            // yet due. Two consecutive checks, so a single sample during an
+            // ordinary source switch cannot trigger it.
+            const el = scope.videoPlayer.el
+                ? scope.videoPlayer.el().querySelector('video') : null;
+            const tornDown = !!el && el.readyState === 0 && el.buffered.length === 0
+                && scope._playbackStarted;
+            scope._tornDownTicks = tornDown ? (scope._tornDownTicks || 0) + 1 : 0;
+            if (scope._tornDownTicks >= 2) {
+                console.warn('HOAST360: media session torn down (readyState 0, no '
+                    + 'buffer) while playing - reloading to recover');
+                scope._recoverByReload();
+                return;
+            }
             if (Date.now() - scope._lastProgressAt > STALL_RELOAD_MS) {
                 console.warn('HOAST360: no playback progress for ' + STALL_RELOAD_MS
                     + 'ms while playing and visible - reloading to recover');
-                window.location.reload();
+                scope._recoverByReload();
             }
         }, STALL_CHECK_INTERVAL_MS);
+    }
+
+    // RELEASE THE AUDIO BEFORE MINTING ANOTHER. Every reload constructs a new
+    // realtime AudioContext, and WebKit does not reclaim the old one on its own:
+    // after a few reloads in one Safari process a fresh context runs, renders and
+    // reports 'running' while producing no sound at all, which only quitting
+    // Safari clears (see the pagehide close above, and probe w1umyk on
+    // 2026-08-29, where the graph measured rms 0.0348 into silence). pagehide
+    // should cover this, but a recovery reload is the one path that can afford to
+    // be certain, so close explicitly and let the reload proceed either way.
+    _recoverByReload() {
+        try {
+            if (this.audioFeed && typeof this.audioFeed.destroy === 'function')
+                this.audioFeed.destroy();
+        } catch (e) { /* going away regardless */ }
+        const go = function () { window.location.reload(); };
+        try {
+            if (this.context && this.context.state !== 'closed') {
+                const p = this.context.close();
+                if (p && p.then) { p.then(go, go); return; }
+            }
+        } catch (e) { /* fall through */ }
+        go();
     }
 
     // The shipped zoom matrices are 25x25 (fourth order). Take the leading
