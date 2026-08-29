@@ -909,10 +909,25 @@ export class HOAST360 {
                     this._uiMuted = false;
                     this.videoPlayer.muted = function (m) {
                         if (m === undefined) return scope2._uiMuted;
-                        scope2._uiMuted = !!m;
+                        // THE ELEMENT'S muted IS NOT THE VIEWER'S INTENT. Under
+                        // IS_IOS, MuteToggle.updateIcon_ writes back
+                        // player.muted(tech_.el_.muted) on every volumechange
+                        // (video.es.js:15438-15439), and the keep-alive pin above
+                        // holds that element muted. Without this guard the setter
+                        // re-enters itself through the event it fires, and
+                        // _uiMuted latches to the ELEMENT rather than the button,
+                        // which pins masterGain to 0 while the control bar still
+                        // shows full volume. A write arriving while we dispatch
+                        // our own volumechange is that mirror, never a tap.
+                        if (scope2._muteSyncing) return scope2.videoPlayer;
+                        const next = !!m;
+                        if (next === scope2._uiMuted) return scope2.videoPlayer;
+                        scope2._uiMuted = next;
                         if (scope2.masterGain && scope2.masterGain.gain)
-                            scope2._setMasterGain(scope2._uiMuted ? 0 : scope2.videoPlayer.volume());
-                        scope2.videoPlayer.trigger('volumechange');
+                            scope2._setMasterGain(next ? 0 : scope2.videoPlayer.volume());
+                        scope2._muteSyncing = true;
+                        try { scope2.videoPlayer.trigger('volumechange'); }
+                        finally { scope2._muteSyncing = false; }
                         return scope2.videoPlayer;
                     };
                 }
@@ -957,8 +972,22 @@ export class HOAST360 {
                     const cb = this.videoPlayer.controlBar;
                     const vp = cb && cb.volumePanel;
                     if (vp && vp.removeClass) vp.removeClass('vjs-hidden');
+                    // THE SLIDER IS A MOUSE CONTROL. video.js binds touchstart to
+                    // the same handler as mousedown and applies the value where
+                    // the finger LANDS, with no drag and no lift required
+                    // (video.es.js:12958, :1530), and under the fork's own
+                    // max-width:480px rule that target is about 35 x 3 px with
+                    // gain 0 at its left edge. On an iPhone Xs a tap meant to
+                    // nudge the level silenced the player outright, twice in one
+                    // session (probes rhr9k0 and wsa46k, masterGain measured at
+                    // 0.00). Touch keeps the panel and the mute toggle, which the
+                    // guard in muted() above now makes work on iOS; level lives
+                    // on the hardware buttons there, as it does in every other
+                    // mobile player.
+                    const fine = !window.matchMedia
+                        || window.matchMedia('(any-pointer: fine)').matches;
                     const vc = vp && vp.volumeControl;
-                    if (vc && vc.removeClass) vc.removeClass('vjs-hidden');
+                    if (fine && vc && vc.removeClass) vc.removeClass('vjs-hidden');
                     // AND THE EVENT NEVER ARRIVES ON iOS. video.js relays
                     // 'volumechange' from the media element, and setting
                     // element.volume is a no-op there, so the element never
@@ -989,8 +1018,13 @@ export class HOAST360 {
                             scopeV._setMasterGain(scopeV._uiMuted ? 0 : v);
                         // iOS fires no volumechange of its own, because the
                         // element's volume never actually moved, so the control
-                        // bar would never redraw without this.
-                        scopeV.videoPlayer.trigger('volumechange');
+                        // bar would never redraw without this. Flagged,
+                        // because MuteToggle.updateIcon_ answers it by writing
+                        // the muted element's state back into muted() - see the
+                        // guard in that setter.
+                        scopeV._muteSyncing = true;
+                        try { scopeV.videoPlayer.trigger('volumechange'); }
+                        finally { scopeV._muteSyncing = false; }
                         return scopeV.videoPlayer;
                     };
                 }
@@ -1291,7 +1325,13 @@ export class HOAST360 {
         loader_filters.load();
 
         this.masterGain = this.context.createGain();
-        this.masterGain.gain.value = 1.0;
+        // FROM THE UI STATE, NOT 1.0. _uiMuted and _uiVolume are live from the
+        // moment the control bar is wired, which is before the first segment
+        // decodes, so a viewer who muted or moved the slider during start-up
+        // used to get full-scale audio anyway until the next volumechange.
+        this.masterGain.gain.value = this._uiMuted
+            ? 0
+            : (typeof this._uiVolume === 'number' ? this._uiVolume : 1.0);
         // RAMPED, never assigned. Writing .gain.value steps the gain within a
         // single sample, which is a click whenever audio is already flowing -
         // audible at startup as a pop just before playback, because the UI-mute
