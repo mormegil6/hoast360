@@ -355,10 +355,20 @@ export class HOAST360 {
         // See docs/IOS-SAFARI.md.
         let skipClose = false;
         try { skipClose = /[?&]noclose=1/.test(window.location.search); } catch (e) { /* no location */ }
-        window.addEventListener('pagehide', function () {
+        window.addEventListener('pagehide', function (e) {
             if (skipClose) return;
+            // e.persisted true means WebKit is bfcache-ing this page for a
+            // likely back/forward restore, not destroying it - the whole JS
+            // heap survives, including this exact context object. Closing it
+            // here kills audio for a page that never actually unloaded.
+            // Measured on an iPhone Xs on 2026-08-31: switching to another
+            // tab and back (and separately, back-arrow then forward) left the
+            // element playing normally, dash.js untouched, while this
+            // unconditional close made this.context permanently 'closed' for
+            // the rest of that page's life, with no reload and no way back.
+            if (e.persisted) return;
             try { if (scope.context && scope.context.state !== 'closed') scope.context.close(); }
-            catch (e) { /* already gone */ }
+            catch (e2) { /* already gone */ }
         });
 
         // KEEP THE SCREEN ON WHILE PLAYING. iOS keeps the display awake for a
