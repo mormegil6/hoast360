@@ -489,11 +489,6 @@ export class HOAST360 {
             }
         });
         setInterval(function () {
-            // A hidden tab is expected to stall - browsers throttle or
-            // suspend background media decode on purpose, and reloading
-            // behind the user's back would fight that rather than help.
-            // The watchdog simply picks back up once the tab is visible.
-            if (document.hidden) return;
             // Only a pause the VIEWER asked for silences the watchdog. dash.js
             // recovers a decode error by detaching and re-attaching the media
             // source, and the HTML load algorithm that runs inside that sets
@@ -511,6 +506,18 @@ export class HOAST360 {
             // t=21 s and was still dead 66 s later, with the stall reload not
             // yet due. Two consecutive checks, so a single sample during an
             // ordinary source switch cannot trigger it.
+            //
+            // CHECKED EVEN WHILE HIDDEN, unlike the stall-timeout branch below.
+            // Backgrounding is plausibly what triggers this collapse in the
+            // first place - ManagedMediaSource exists specifically for iOS to
+            // reclaim media resources from tabs it is not showing - which makes
+            // a hidden tab the case that most needs this, not one to skip.
+            // Measured live 2026-08-31 (probe np4nod): a session collapsed to
+            // readyState 0 right as the tab went to background and sat dead for
+            // 150+ seconds with no recovery, purely because this whole check
+            // used to return early on document.hidden before ever reaching the
+            // torn-down test below. Reloading costs nothing when nobody is
+            // looking at the tab anyway.
             const el = scope.videoPlayer.el
                 ? scope.videoPlayer.el().querySelector('video') : null;
             const tornDown = !!el && el.readyState === 0 && el.buffered.length === 0
@@ -522,6 +529,14 @@ export class HOAST360 {
                 scope._recoverByReload();
                 return;
             }
+            // A hidden tab is expected to stall for reasons that have nothing
+            // to do with a torn-down session - browsers throttle or suspend
+            // background media decode on purpose, and reloading behind the
+            // user's back for an ordinary stall would fight that rather than
+            // help. The tornDown check above is exempt from this for the
+            // reason given there; only the generic progress-timeout below
+            // waits for the tab to become visible again.
+            if (document.hidden) return;
             if (Date.now() - scope._lastProgressAt > STALL_RELOAD_MS) {
                 console.warn('HOAST360: no playback progress for ' + STALL_RELOAD_MS
                     + 'ms while playing and visible - reloading to recover');
