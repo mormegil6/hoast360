@@ -213,7 +213,23 @@ export default class SegmentAudioFeed {
 
     stats() {
         const el = this.getElement();
+        // Lazily watch the context's state transitions: iOS flips a context
+        // through 'interrupted' without any page-visible event between two
+        // 15-second beacon samples, and a stuttering context clock is one of
+        // the two candidate causes of the drift-resync loop. First stats()
+        // call arms it, well before any burst matters.
+        if (!this._ctxWatch && this.ctx && this.ctx.addEventListener) {
+            this._ctxWatch = true;
+            const self = this;
+            this.ctx.addEventListener('statechange', function () {
+                (self._ctxStates = self._ctxStates || []).push({
+                    t: Math.round(self.ctx.currentTime * 100) / 100, s: self.ctx.state });
+                if (self._ctxStates.length > 10) self._ctxStates.shift();
+            });
+        }
         return {
+            lastResyncs: this._lastResyncs || [],
+            ctxStates: this._ctxStates || [],
             state: this.state, epoch: this.epoch, N: this.N,
             ring: this.ring.length, decoded: this.decoded.size,
             scheduled: this.nodes.length,
@@ -1444,6 +1460,18 @@ export default class SegmentAudioFeed {
 
     _hardResync(reason) {
         this.counters.resyncs++;
+        // Field forensics: a resync burst empties driftSamples every time, so
+        // by the moment a beacon samples stats() the median reads 0 and the
+        // burst's cause is invisible (session jzat56, 46 resyncs, drift=0 in
+        // every sample). Keep the last few resyncs' reason and magnitude.
+        const el0 = this.getElement();
+        (this._lastResyncs = this._lastResyncs || []).push({
+            reason: reason || 'drift',
+            driftMs: Math.round(this._medianDrift() * 1000),
+            elT: el0 ? Math.round(el0.currentTime * 100) / 100 : null,
+            ctxT: Math.round(this.ctx.currentTime * 100) / 100,
+        });
+        if (this._lastResyncs.length > 8) this._lastResyncs.shift();
         console.debug('SegmentAudioFeed: hard resync #' + this.counters.resyncs
             + ' (' + (reason || 'drift') + ') drift=' + (this._medianDrift() * 1000).toFixed(1) + 'ms');
         this._flush(RAMP_S);
