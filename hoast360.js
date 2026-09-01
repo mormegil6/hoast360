@@ -371,6 +371,33 @@ export class HOAST360 {
             catch (e2) { /* already gone */ }
         });
 
+        // DISABLE BFCACHE FOR THIS PAGE, experimental, opt-in via
+        // ?nobfcache=1. Theory (2026-08-31): the persisted check just above
+        // correctly leaves a bfcache-frozen page's context open when WebKit
+        // intends to restore that exact instance later. But if the next
+        // navigation instead lands on a genuinely fresh load of this page -
+        // forward to a new URL, not a browser back/forward restore of the
+        // frozen one - that frozen instance is never torn down at all: its
+        // context and ManagedMediaSource just sit there indefinitely, with no
+        // event left to hook and no way for the new page's own JS to reach
+        // in and close them, bfcached pages being separate, isolated
+        // realms. A fresh page's own ManagedMediaSource then has to acquire
+        // a sourceopen grant while a ghost from the previous visit may still
+        // be holding one - one candidate for why a single tab navigating
+        // away and back (no second tab needed) was already enough to
+        // reproduce the silent-teardown crash all night. A no-op unload
+        // listener is the standard way to make a page ineligible for
+        // bfcache, so every navigation away and back goes through a full
+        // teardown and fresh reload instead of a frozen-instance restore.
+        // Off by default pending a verdict on whether it actually reduces
+        // the crash rate; the cost is losing instant back/forward if it does
+        // not.
+        let disableBfcache = false;
+        try { disableBfcache = /[?&]nobfcache=1/.test(window.location.search); } catch (e) { /* no location */ }
+        if (disableBfcache) {
+            window.addEventListener('unload', function () { /* no-op: presence alone opts the page out of bfcache */ });
+        }
+
         // KEEP THE SCREEN ON WHILE PLAYING. iOS keeps the display awake for a
         // video that is playing audio, and this element is muted by design
         // because the real audio comes from Web Audio, so the phone treats a
