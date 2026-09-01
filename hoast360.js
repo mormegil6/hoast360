@@ -398,6 +398,12 @@ export class HOAST360 {
             window.addEventListener('unload', function () { /* no-op: presence alone opts the page out of bfcache */ });
         }
 
+        // Re-arm the audio session category on every pageshow: a bfcache
+        // restore re-enters a page whose category cache may be stale for the
+        // same GPU-relaunch reason as above, and on a healthy stack the cycle
+        // costs nothing. See _rearmAudioSession.
+        window.addEventListener('pageshow', function () { scope._rearmAudioSession(); });
+
         // KEEP THE SCREEN ON WHILE PLAYING. iOS keeps the display awake for a
         // video that is playing audio, and this element is muted by design
         // because the real audio comes from Web Audio, so the phone treats a
@@ -669,9 +675,34 @@ export class HOAST360 {
             const f = this.audioFeed;
             if (f && typeof f.reanchor === 'function') f.reanchor();
         } catch (e) { /* the feed keeps its own watchers */ }
+        // The teardown this recovery answers is, per the WebKit source trail,
+        // most often the visible half of a GPU-process relaunch, after which
+        // the tab's audio category is silently wedged; re-arm it here too.
+        this._rearmAudioSession();
         const pr = this.videoPlayer.play();
         if (pr && pr.catch) pr.catch(function () { /* gesture-gated; the viewer's next tap resumes */ });
         return true;
+    }
+
+    // RE-ARM THE AUDIO SESSION CATEGORY. WebKit's web-process RemoteAudioSession
+    // caches the category and dedups SetCategory IPCs, and never clears that
+    // cache when the GPU process (owner of the one real AVAudioSession) dies
+    // and relaunches. A tab that set navigator.audioSession.type='playback'
+    // therefore can never re-push MediaPlayback to the fresh GPU proxy, whose
+    // default None resolves to AVAudioSessionCategoryAmbient, which the
+    // iPhone's Ring/Silent switch hard-mutes while every render callback keeps
+    // firing (the tab-wide silence of WebKit bug 323104, sessions ggwsi0,
+    // jzat56, q22o9m). Cycling the type through a genuinely different value
+    // forces two real category changes through every dedup guard. On a healthy
+    // stack this is two redundant IPCs and a one-tick flip.
+    _rearmAudioSession() {
+        try {
+            if (!navigator.audioSession) return;
+            navigator.audioSession.type = 'ambient';
+            setTimeout(function () {
+                try { navigator.audioSession.type = 'playback'; } catch (e) { /* unsupported */ }
+            }, 0);
+        } catch (e) { /* unsupported */ }
     }
 
     // The shipped zoom matrices are 25x25 (fourth order). Take the leading
