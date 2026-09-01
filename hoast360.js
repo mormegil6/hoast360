@@ -525,6 +525,27 @@ export class HOAST360 {
             // a timeupdate while zeroing the clock, which is not progress.
             if (t !== null && t > 0) scope._inPlaceRecoveryTried = false;
         });
+        // THE EMPTIED EVENT IS THE COLLAPSE ITSELF, so react to it instead of
+        // waiting out up to two 15-second poll ticks: half a minute of black
+        // error box is longer than a viewer waits before reloading by hand
+        // (measured on the operator, 2026-09-01). Verify 2 s later that the
+        // element is genuinely dead first: dash.js's own recovery and the
+        // in-place re-attach both run the load algorithm too, and their
+        // emptied resolves to a healthy element by then, so they no-op here.
+        // The interval watchdog above stays as the backstop for a collapse
+        // whose emptied fired before this listener existed.
+        try {
+            const vel = scope.videoPlayer.el().querySelector('video');
+            vel.addEventListener('emptied', function () {
+                if (scope._userPaused || !scope._playbackStarted) return;
+                setTimeout(function () {
+                    const el2 = scope.videoPlayer && scope.videoPlayer.el
+                        ? scope.videoPlayer.el().querySelector('video') : null;
+                    if (!el2 || el2.readyState !== 0 || el2.buffered.length !== 0) return;
+                    scope._recoverInPlace('element emptied while playing');
+                }, 2000);
+            });
+        } catch (e) { /* no element yet; the interval watchdog covers it */ }
         setInterval(function () {
             // Only a pause the VIEWER asked for silences the watchdog. dash.js
             // recovers a decode error by detaching and re-attaching the media
@@ -567,29 +588,11 @@ export class HOAST360 {
                 // closes a ManagedMediaSource permanently, endstreaming ->
                 // abort -> emptied, the exact tail 8 of 11 iPhone captures
                 // show). Re-attaching a source is the only recovery that
-                // works - and attachSource() alone restored playback in every
-                // harness run, in under a second, where a reload costs the
-                // whole page plus the WASM feed warmup. One attempt per
-                // collapse: if the element is still dead two ticks later,
-                // fall back to the reload, which is known to work.
-                const mp = scope.videoPlayer && scope.videoPlayer.dash
-                    && scope.videoPlayer.dash.mediaPlayer;
-                if (mp && !scope._inPlaceRecoveryTried) {
-                    scope._inPlaceRecoveryTried = true;
-                    scope._tornDownTicks = 0;
-                    console.warn('HOAST360: media session torn down (readyState 0, '
-                        + 'no buffer) while playing - re-attaching the source in place');
-                    try {
-                        mp.attachSource(mp.getSource());
-                        // The collapse left the element paused without anyone
-                        // asking (the load algorithm sets paused=true with no
-                        // pause event, see above); the viewer wanted it
-                        // playing, so resume once the new source is attached.
-                        const pr = scope.videoPlayer.play();
-                        if (pr && pr.catch) pr.catch(function () { /* gesture-gated; the viewer's next tap resumes */ });
-                        return;
-                    } catch (e) { /* fall through to the reload */ }
-                }
+                // works; see _recoverInPlace. This interval branch is the
+                // backstop for a collapse whose emptied event the fast path
+                // below never saw, and for the second detection after a spent
+                // in-place attempt, which falls through to the reload.
+                if (scope._recoverInPlace('media session torn down (readyState 0, no buffer) while playing')) return;
                 console.warn('HOAST360: media session torn down (readyState 0, no '
                     + 'buffer) while playing - reloading to recover');
                 scope._recoverByReload();
@@ -632,6 +635,43 @@ export class HOAST360 {
             }
         } catch (e) { /* fall through */ }
         go();
+    }
+
+    // The in-place half of torn-down recovery, shared by the fast emptied
+    // path and the interval watchdog. One attempt per collapse (re-armed when
+    // the clock moves again); returns false when the attempt is spent or
+    // failed, so the caller can fall back to the reload, which is known to
+    // work. Also clears the error overlay videojs raises over the dead
+    // element, resumes the playback the collapse silently paused, and kicks
+    // the WASM feed the same way the context watcher does, once the fresh
+    // source can play: the feed's chain is anchored to a clock the detach
+    // stopped, and nothing else tells it the timeline came back.
+    _recoverInPlace(reason) {
+        const mp = this.videoPlayer && this.videoPlayer.dash
+            && this.videoPlayer.dash.mediaPlayer;
+        if (!mp || this._inPlaceRecoveryTried) return false;
+        this._inPlaceRecoveryTried = true;
+        this._tornDownTicks = 0;
+        console.warn('HOAST360: ' + reason + ' - re-attaching the source in place');
+        try {
+            mp.attachSource(mp.getSource());
+        } catch (e) {
+            return false;
+        }
+        try { this.videoPlayer.error(null); } catch (e) { /* overlay only */ }
+        // The feed cannot see this recovery: the re-attach rebases the clock
+        // with a position write that lands before metadata, so no 'seeking'
+        // event fires and its anchor keeps mapping the dead timeline (measured
+        // on an iPhone Xs, session ggwsi0: video back in seconds, decodes
+        // frozen, audio never returned). Tell it explicitly; the play() below
+        // then drives the rebuild against the rebased clock.
+        try {
+            const f = this.audioFeed;
+            if (f && typeof f.reanchor === 'function') f.reanchor();
+        } catch (e) { /* the feed keeps its own watchers */ }
+        const pr = this.videoPlayer.play();
+        if (pr && pr.catch) pr.catch(function () { /* gesture-gated; the viewer's next tap resumes */ });
+        return true;
     }
 
     // The shipped zoom matrices are 25x25 (fourth order). Take the leading

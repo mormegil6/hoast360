@@ -382,6 +382,24 @@ export default class SegmentAudioFeed {
         this._pump();
     }
 
+    // FOR THE OWNER'S IN-PLACE RECOVERY. Re-attaching the MediaSource rebases
+    // the element clock, and the position write lands before metadata, so no
+    // 'seeking' event ever fires: to this feed the rebase is invisible. The
+    // anchor keeps mapping the dead timeline, _resume()'s idempotent guard
+    // sees running+anchor+nodes and returns, and the pump idles forever on
+    // stale bookkeeping (measured on an iPhone Xs, session ggwsi0, 2026-09-01:
+    // decodes frozen across 30 s, then drained to stalled). Same recipe as the
+    // 'seeking' handler; the flush also drops the anchor, so the next resume
+    // rebuilds against the rebased clock.
+    reanchor() {
+        if (this.destroyed) return;
+        this._forgetFetched();
+        this._flush(RAMP_S);
+        this.state = this.state === 'paused' ? 'paused' : 'stalled';
+        const el = this.getElement();
+        if (el && !el.paused) this._resume();
+    }
+
     // ---- dash.js tap -------------------------------------------------------
 
     // ---- self-fetched audio (MSE-refused engines) --------------------------
