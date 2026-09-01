@@ -487,6 +487,10 @@ export class HOAST360 {
                 scope._lastProgressT = t;
                 scope._lastProgressAt = Date.now();
             }
+            // A moving clock means the last in-place recovery took, so re-arm
+            // it for the next collapse. t=0 excluded: the load algorithm fires
+            // a timeupdate while zeroing the clock, which is not progress.
+            if (t !== null && t > 0) scope._inPlaceRecoveryTried = false;
         });
         setInterval(function () {
             // Only a pause the VIEWER asked for silences the watchdog. dash.js
@@ -524,6 +528,35 @@ export class HOAST360 {
                 && scope._playbackStarted;
             scope._tornDownTicks = tornDown ? (scope._tornDownTicks || 0) + 1 : 0;
             if (scope._tornDownTicks >= 2) {
+                // IN PLACE FIRST, RELOAD SECOND. The torn-down state is the
+                // MediaSource being detached from the element (measured on
+                // macOS Safari 27: an external removeAttribute('src')+load()
+                // closes a ManagedMediaSource permanently, endstreaming ->
+                // abort -> emptied, the exact tail 8 of 11 iPhone captures
+                // show). Re-attaching a source is the only recovery that
+                // works - and attachSource() alone restored playback in every
+                // harness run, in under a second, where a reload costs the
+                // whole page plus the WASM feed warmup. One attempt per
+                // collapse: if the element is still dead two ticks later,
+                // fall back to the reload, which is known to work.
+                const mp = scope.videoPlayer && scope.videoPlayer.dash
+                    && scope.videoPlayer.dash.mediaPlayer;
+                if (mp && !scope._inPlaceRecoveryTried) {
+                    scope._inPlaceRecoveryTried = true;
+                    scope._tornDownTicks = 0;
+                    console.warn('HOAST360: media session torn down (readyState 0, '
+                        + 'no buffer) while playing - re-attaching the source in place');
+                    try {
+                        mp.attachSource(mp.getSource());
+                        // The collapse left the element paused without anyone
+                        // asking (the load algorithm sets paused=true with no
+                        // pause event, see above); the viewer wanted it
+                        // playing, so resume once the new source is attached.
+                        const pr = scope.videoPlayer.play();
+                        if (pr && pr.catch) pr.catch(function () { /* gesture-gated; the viewer's next tap resumes */ });
+                        return;
+                    } catch (e) { /* fall through to the reload */ }
+                }
                 console.warn('HOAST360: media session torn down (readyState 0, no '
                     + 'buffer) while playing - reloading to recover');
                 scope._recoverByReload();
