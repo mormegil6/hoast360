@@ -821,8 +821,34 @@ export class HOAST360 {
             }
         }
 
+        // LEAVING PiP IS TWO DIFFERENT ACTIONS. The event fires both when the
+        // viewer closes the window and when they press its return-to-tab
+        // control, and only the first should stop playback: coming back to the
+        // page and finding it paused is not what anyone asked for. The spec
+        // gives no flag to tell them apart, but the outcome does. Returning
+        // makes the document visible; closing it from another app leaves the
+        // document hidden, which is the case where audio would otherwise keep
+        // playing with nothing on screen to stop it. Checked after a beat,
+        // because visibility settles just after the event.
+        // Do not race the visibility flip. Sampling document.hidden once after
+        // a fixed delay worked on iOS and failed on Android, where the document
+        // is still hidden well after the event when the viewer presses
+        // return-to-tab. So arm the pause and let becoming visible cancel it:
+        // whichever order the two arrive in, coming back never stops playback,
+        // and closing the window from another app still does.
+        let pipExitTimer = null;
+        const cancelPipExitPause = function () {
+            if (pipExitTimer) { clearTimeout(pipExitTimer); pipExitTimer = null; }
+        };
+        document.addEventListener('visibilitychange', function () {
+            if (!document.hidden) cancelPipExitPause();
+        });
         const leftPip = function () {
-            if (!el.paused) el.pause();
+            cancelPipExitPause();
+            pipExitTimer = setTimeout(function () {
+                pipExitTimer = null;
+                if (document.hidden && !el.paused) el.pause();
+            }, 1500);
         };
         el.addEventListener('leavepictureinpicture', leftPip);
         // webkitpresentationmodechanged fires for FULLSCREEN too, so "mode is
