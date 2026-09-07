@@ -1,3 +1,15 @@
+/* NO AUDIO TRACK SELECTOR. video.js offers one as soon as the manifest carries
+   more than one audio AdaptationSet, which it has since the silent stereo
+   keep-alive shipped. Both entries render unlabelled, and picking the second
+   one points the element at the keep-alive: on the native feed backend that
+   takes the programme away from the decoder, measured as 2 channels, degraded,
+   "unsupported-channel-count", and no spatial audio at all. There is exactly
+   one correct audio track here and the feed already chooses it, so the control
+   offers the viewer nothing but a way to break their own playback. */
+.vjs-audio-button {
+    display: none !important;
+}
+
 /* The Picture-in-Picture control is shown, having been hidden here before.
    PiP presents the video element, which in this player is a texture source for
    the sphere rather than the picture on screen, so the floating window shows a
