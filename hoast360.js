@@ -129,6 +129,19 @@ videojs.Html5DashJS.hook('beforeinitialize', function (player, mediaPlayer) {
     }
     mediaPlayer.updateSettings({ streaming: {
         delay: { liveDelay: LIVE_DELAY_S },
+        // NEVER RESTORE A REMEMBERED AUDIO TRACK. dash.js persists the last
+        // selected track to localStorage and restores it on every later
+        // session, per origin. There is exactly one correct audio track here,
+        // the ambisonic programme, and the feed selects it by codec and channel
+        // count; the only other set in the manifest is the silent stereo
+        // keep-alive. So a remembered choice can only ever be the wrong one,
+        // and on the native feed backend restoring it starves the decoder:
+        // measured on a Galaxy S25 as 2 channels, degraded,
+        // "unsupported-channel-count", and no spatial audio at all, on a build
+        // whose own code repoints nothing. It survives reloads, so a viewer who
+        // once touched the audio menu stays broken until site data is cleared.
+        // Disabling the cache stops both the write and the restore.
+        lastMediaSettingsCachingInfo: { enabled: false },
         // Cap SourceBuffer depth so high-bitrate rungs stay within MSE quota. At
         // dash.js defaults, >10 min VOD uses bufferTimeAtTopQualityLongForm = 60 s;
         // 60 s of an 8K/60 Mbps rung is ~450 MB and throws QuotaExceededError, so
