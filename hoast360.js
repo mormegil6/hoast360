@@ -82,6 +82,51 @@ const IS_CHROMIUM = typeof navigator !== 'undefined' && /Chrome\//.test(navigato
 // attachment is gated by the flag the owning instance sets before calling
 // src().
 videojs.Html5DashJS.hook('beforeinitialize', function (player, mediaPlayer) {
+    // PUT THE KEEP-ALIVE TRACK ON THE ELEMENT, NOT THE PROGRAMME. The live
+    // manifest carries two audio sets: the ambisonic programme (4 or 16 ch) and
+    // a silent stereo keep-alive. The programme is fetched and rendered by the
+    // segment feed, never by the element, so whichever set dash.js attaches to
+    // the element is only ever there to keep a media session alive. Asking for
+    // the 2-channel one makes that explicit rather than accidental.
+    //
+    // It matters because the element can only be unmuted safely when it carries
+    // silence, and unmuting is what earns a Now Playing entry on iOS and a media
+    // notification on Android (Chromium creates no media session for a muted
+    // element). Safari reached that state by luck, dropping the 16-channel Opus
+    // set as undecodable; Chromium decodes it, so without this it attaches the
+    // programme and unmuting would play raw ambisonics at the viewer.
+    //
+    // Done on STREAM_INITIALIZED rather than through
+    // setInitialMediaSettingsFor here: the MediaController that stores those
+    // settings does not exist until initialize() runs, so the call throws in
+    // this hook and a defensive catch hides it. Measured: Chromium kept the
+    // 16-channel set, and Safari's stereo selection was its own capability
+    // filter dropping Opus, not this code working.
+    //
+    // Safe on a manifest with no keep-alive set: nothing matches, the selection
+    // is left alone, and the mute pin keeps the element muted because the track
+    // it finds is not stereo.
+    // ONLY WHERE THE FEED FETCHES ITS OWN AUDIO. On the native backend the feed
+    // consumes the very audio fragments dash.js loads, so repointing this track
+    // takes the programme away from it: measured as N=2, degraded=true,
+    // degradeReason "unsupported-channel-count", and silence. The element's
+    // audio track IS the ambisonic source there and must not be touched. Only
+    // when the feed self-fetches (the WASM path) is the element's track free.
+    if (mediaPlayer.on) {
+        mediaPlayer.on('streamInitialized', function () {
+            try {
+                const h = player.__hoast360;
+                if (!h || h._feedBackend !== 'wasm') return;
+                const tracks = mediaPlayer.getTracksFor('audio') || [];
+                let silent = null;
+                tracks.forEach(function (t) {
+                    if ((t.audioChannelConfiguration || []).indexOf('2') !== -1) silent = t;
+                });
+                const now = mediaPlayer.getCurrentTrackFor('audio');
+                if (silent && silent !== now) mediaPlayer.setCurrentTrack(silent);
+            } catch (e) { /* leave dash.js's own choice in place */ }
+        });
+    }
     mediaPlayer.updateSettings({ streaming: {
         delay: { liveDelay: LIVE_DELAY_S },
         // Cap SourceBuffer depth so high-bitrate rungs stay within MSE quota. At
@@ -725,6 +770,88 @@ export class HOAST360 {
     // an iPhone Xs showed on 2026-08-28. Expanding the player container instead
     // keeps the canvas, the projection and the controls, at the cost of the
     // browser chrome staying on screen.
+    // PICTURE-IN-PICTURE, the sanctioned way to keep audio going once the
+    // browser is backgrounded. Both engines otherwise pause a backgrounded
+    // video by policy (WebKit by media type on iOS, Chromium via
+    // IsBackgroundMediaSuspendEnabled on Android phones), and both exempt PiP.
+    //
+    // Two things video.js does not do for us. Its own control uses the standard
+    // requestPictureInPicture(), which iPhone Safari does not expose; there the
+    // call is webkitSetPresentationMode('picture-in-picture'), measured working
+    // on an iPhone Xs. And leaving PiP should stop playback rather than leave
+    // audio running invisibly, which is the whole objection to keeping it alive
+    // by other means.
+    _installPictureInPicture() {
+        if (this._pipInstalled) return;
+        let el;
+        try { el = this.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el(); }
+        catch (e) { return; }
+        if (!el) return;
+        this._pipInstalled = true;
+        const scope = this;
+
+        // WebKit fallback, installed only where the standard call is missing so
+        // the button keeps video.js's own behaviour everywhere else.
+        if (!el.requestPictureInPicture && el.webkitSetPresentationMode) {
+            const btn = this.videoPlayer.controlBar
+                && this.videoPlayer.controlBar.getChild('PictureInPictureToggle');
+            if (btn) {
+                btn.off('click');
+                btn.on('click', function () {
+                    try {
+                        el.webkitSetPresentationMode(
+                            el.webkitPresentationMode === 'picture-in-picture'
+                                ? 'inline' : 'picture-in-picture');
+                    } catch (e) { /* refused; the viewer can try again */ }
+                });
+                btn.show();
+            }
+        }
+
+        const leftPip = function () {
+            if (!el.paused) el.pause();
+        };
+        el.addEventListener('leavepictureinpicture', leftPip);
+        // webkitpresentationmodechanged fires for FULLSCREEN too, so "mode is
+        // now inline" is not the same as "left PiP". Pausing on it outright
+        // stops playback every time the viewer closes fullscreen. Only act when
+        // the mode we are leaving was actually picture-in-picture.
+        let lastMode = el.webkitPresentationMode || 'inline';
+        el.addEventListener('webkitpresentationmodechanged', function () {
+            const mode = el.webkitPresentationMode || 'inline';
+            if (lastMode === 'picture-in-picture' && mode !== 'picture-in-picture') leftPip();
+            lastMode = mode;
+        });
+        // Keep a media session that reflects reality while the window is up, so
+        // the transport in the notification is not a dead control. The browser
+        // derives the rest, including the timeline, from the element itself.
+        if ('mediaSession' in navigator) {
+            try {
+                navigator.mediaSession.setActionHandler('play', function () {
+                    scope.videoPlayer.play();
+                });
+                navigator.mediaSession.setActionHandler('pause', function () {
+                    scope.videoPlayer.pause();
+                });
+                // Polled as well as event driven. Driving it from play/pause
+                // alone left the notification's transport showing the wrong
+                // icon: the events can fire before this installs, or on an
+                // element the session is not built from, and the control then
+                // looks dead even though pressing it works. Reading the element
+                // every half second cannot drift.
+                const sync = function () {
+                    const want = el.paused ? 'paused' : 'playing';
+                    if (navigator.mediaSession.playbackState !== want)
+                        navigator.mediaSession.playbackState = want;
+                };
+                el.addEventListener('play', sync);
+                el.addEventListener('pause', sync);
+                this._mediaSessionSync = setInterval(sync, 500);
+                sync();
+            } catch (e) { /* action handlers are best effort */ }
+        }
+    }
+
     _installPseudoFullscreen() {
         if (this._pseudoFsInstalled) return;
         const canElementFullscreen = !!(document.fullscreenEnabled
@@ -1106,8 +1233,28 @@ export class HOAST360 {
                 // that leaves this on measures a paused element rather than the
                 // pipeline it meant to test. The keep-alive is verified in real
                 // Safari by hand; harnesses turn it off and test everything else.
-                let keepAlive = scope2._feedBackend === 'wasm'
-                    && new URLSearchParams(window.location.search).get('keepalive') !== '0';
+                // UNMUTE ONLY WHEN THE ELEMENT CARRIES SILENCE, read from
+                // dash.js rather than inferred from the platform. The old test
+                // was _feedBackend === 'wasm', a proxy for "Safari dropped the
+                // Opus set, so whatever is left is silent". It held the element
+                // muted forever on Chromium, which decodes the programme, and a
+                // muted element gets no media session there at all: measured on
+                // a Galaxy S25, background playback with no notification and
+                // nothing to press. Asking which track is actually attached
+                // covers both engines and needs no per-browser knowledge.
+                let keepAliveEnabled =
+                    new URLSearchParams(window.location.search).get('keepalive') !== '0';
+                let elementCarriesSilence = function () {
+                    try {
+                        const mp = scope2.videoPlayer.dash && scope2.videoPlayer.dash.mediaPlayer;
+                        if (!mp || !mp.getCurrentTrackFor) return false;
+                        const t = mp.getCurrentTrackFor('audio');
+                        // No track at all is not silence worth unmuting for: it
+                        // buys no media session on either engine, and WebKit
+                        // suspends the element the same way regardless.
+                        return !!t && (t.audioChannelConfiguration || []).indexOf('2') !== -1;
+                    } catch (e) { return false; }
+                };
                 // GATED ON A REAL GESTURE. WebKit pauses an unmuted element that
                 // began playing without one, so unmuting unconditionally breaks
                 // muted autoplay outright - it stopped playback dead in every
@@ -1123,8 +1270,9 @@ export class HOAST360 {
                     try {
                         let el = scope2.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el();
                         if (!el) return;
-                        if (keepAlive && sawGesture) { if (el.muted) el.muted = false; }
-                        else if (!el.muted) el.muted = true;
+                        if (keepAliveEnabled && sawGesture && elementCarriesSilence()) {
+                            if (el.muted) el.muted = false;
+                        } else if (!el.muted) el.muted = true;
                     } catch (e) { /* tech not ready yet */ }
                 };
                 pin();
@@ -1260,6 +1408,7 @@ export class HOAST360 {
                     };
                 }
                 this._installPseudoFullscreen();
+                this._installPictureInPicture();
             } catch (e) { /* tech not ready; dash.js will surface the failure */ }
             this.videoPlayer.src({ type: 'application/dash+xml', src: this.mediaUrl });
             this._wireQualityLevels();
@@ -1431,6 +1580,8 @@ export class HOAST360 {
         if (this.sourceNode) try { this.sourceNode.disconnect(); } catch (e) { /* already disconnected */ }
         if (this._elementSink) { try { this._elementSink.disconnect(); } catch (e) { /* already disconnected */ } this._elementSink = null; }
         if (this._mutePin) { clearInterval(this._mutePin); this._mutePin = null; }
+        if (this._mediaSessionSync) { clearInterval(this._mediaSessionSync); this._mediaSessionSync = null; }
+        this._pipInstalled = false;
         if (this._origMuted) { this.videoPlayer.muted = this._origMuted; this._origMuted = null; }
         if (this.rotator && this.rotator.out) this.rotator.out.disconnect();
         if (this.multiplier && this.multiplier.out) this.multiplier.out.disconnect();
@@ -1497,6 +1648,7 @@ export class HOAST360 {
             // and restore the player's native muted() so the UI drives the
             // element again
             if (this._mutePin) { clearInterval(this._mutePin); this._mutePin = null; }
+            if (this._mediaSessionSync) { clearInterval(this._mediaSessionSync); this._mediaSessionSync = null; }
             if (this._origMuted) { this.videoPlayer.muted = this._origMuted; this._origMuted = null; }
             try {
                 let el = this.videoPlayer.tech({ IWillNotUseThisInPlugins: true }).el();
