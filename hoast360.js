@@ -49,10 +49,11 @@ import './css/hoast360.css';
 // gives an explicit liveDelay precedence over the MPD's
 // suggestedPresentationDelay; the setting is ignored for static (VOD) MPDs.
 const LIVE_DELAY_S = 30;
-const BUILD_TAG = 'rf55';  // diagnostic badge + gl.maxTextureSize. BUMP THIS on
-                            // any bundle change: it is the only build marker
-                            // visible in a deployed player, and 'is this the new
-                            // bundle?' cost real time on 2026-08-08 without it.
+const BUILD_TAG = 'rf55';  // diagnostic badge + gl.maxTextureSize. A hand-set
+                            // label, not the cache key: index.html's ?v= is a
+                            // hash of the bundle. The build stamp that identifies
+                            // the exact build is window.HOAST360_BUILD, which is
+                            // also logged when the player starts.
 
 // STALL WATCHDOG: how long playback may go without progress (while playing
 // and the tab is visible) before the session is treated as dead and
@@ -1026,26 +1027,28 @@ export class HOAST360 {
         if (!this.opusSupport && !wasmFeedPlanned) {
             // Two different failures need two different answers. A browser that
             // cannot decode Opus at all is a dead end here; one that decodes
-            // stereo but not multichannel is almost certainly a fixable Chrome
-            // field trial, and telling that user "your browser does not support
-            // Opus" would be both wrong and useless, since their browser
-            // supports it right up until the channel count goes above 2.
+            // stereo but not multichannel is almost certainly Chrome 151 or 152
+            // with a field trial that later builds fixed, and telling that user
+            // "your browser does not support Opus" would be both wrong and
+            // useless, since their browser supports it right up until the
+            // channel count goes above 2.
             if (opus.diagnosis === 'multichannel-only-failure') {
                 this.videoPlayer.error(
                     'Error: This browser decodes stereo Opus but fails on multichannel, which this '
-                    + 'player needs. Firefox or Brave will work. If you are on recent Chrome there is '
-                    + 'a one-flag fix, with the exact command for each OS: ' + CHROME_OPUS_HELP_URL);
+                    + 'player needs. Firefox or Brave will work. On Chrome, updating it fixes this. '
+                    + 'If you cannot update, a one-flag fix works on Chrome 151 and 152, with the '
+                    + 'exact command for each OS: ' + CHROME_OPUS_HELP_URL);
                 // The message is rendered as plain text by video.js, so repeat
                 // it where a link is clickable and the detail can be longer.
                 console.error(
                     'Multichannel Opus decode failed while stereo Opus decoded successfully.\n'
                     + 'Check chrome://version before concluding a cause: the field trial below\n'
-                    + 'exists only in recent Chrome, so on an older embedded Chromium the cause\n'
+                    + 'affected Chrome 151 and 152, so on an older embedded Chromium the cause\n'
                     + 'is a decoder that never supported multichannel Opus, not this trial.\n'
-                    + 'Known cause on recent Chrome: the DirectOpusAudioDecoding field trial, which is\n'
+                    + 'Known cause on Chrome 151 and 152: the DirectOpusAudioDecoding field trial, which is\n'
                     + 'server-delivered, does not appear in chrome://flags, and is NOT cleared by\n'
-                    + 'incognito, a guest profile, or restarting the browser.\n'
-                    + 'Workaround: relaunch Chrome with --disable-features=DirectOpusAudioDecoding\n'
+                    + 'incognito, a guest profile, or restarting the browser. Fixed in Chrome 153.0.8010.36 and later.\n'
+                    + 'Workaround on 151 and 152: relaunch Chrome with --disable-features=DirectOpusAudioDecoding\n'
                     + 'Background and evidence: ' + CHROME_OPUS_HELP_URL);
             } else {
                 this.videoPlayer.error('Error: Your browser does not support the OPUS audio codec. Please use Firefox or Chrome-based browsers.');

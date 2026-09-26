@@ -5,16 +5,16 @@
 //
 //   multichannel OK               -> everything this player needs works
 //   multichannel FAILS, stereo OK -> the browser decodes Opus but not beyond
-//                                    2 channels. Seen in the wild on Chrome:
-//                                    the DirectOpusAudioDecoding field trial
-//                                    (server-delivered, at EnabledLaunch as of
-//                                    2026-08-16, absent from chrome://flags)
-//                                    breaks every channel count above 2 in
-//                                    BOTH decodeAudioData and MSE, while
-//                                    leaving stereo working. Diagnosing that
+//                                    2 channels. Seen in the wild on Chrome
+//                                    151 and 152: the DirectOpusAudioDecoding
+//                                    field trial (server-delivered, absent from
+//                                    chrome://flags) broke every channel count
+//                                    above 2 in BOTH decodeAudioData and MSE,
+//                                    while leaving stereo working. Chrome fixed
+//                                    it from 153.0.8010.36. Diagnosing that
 //                                    from the outside is unreasonable, so the
-//                                    player names it and gives the flag that
-//                                    restores it.
+//                                    player names it, says to update, and gives
+//                                    the flag that restores it on 151 and 152.
 //   both FAIL                     -> no usable Opus/WebM decode at all. Safari
 //                                    27 is here: WebKit has a long history of
 //                                    MediaSource.isTypeSupported() answering
