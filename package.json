@@ -35,6 +35,7 @@
     "dashjs": "^4.7.4",
     "global": "^4.4.0",
     "numeric": "^1.2.6",
+    "opus-decoder": "0.7.12",
     "spherical-harmonic-transform": "^0.1.1",
     "three": "~0.125.2",
     "video.js": "^7.21.7",

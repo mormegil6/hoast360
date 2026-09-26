@@ -1,4 +1,4 @@
-/* global globalThis */
+/* global globalThis, __OPUS_DECODER_FILE__ */
 // WasmOpusBackend - decode Opus-in-fMP4 DASH segments without the platform.
 //
 // WHY THIS EXISTS. Safari cannot decode multichannel Opus through any native
@@ -10,9 +10,11 @@
 // nothing else changes: same fetch tap, same ring, same scheduling, same
 // drift correction.
 //
-// The decoder is eshaz/wasm-audio-decoders' opus-decoder, bundled from source
-// because the published dist minifies away its multichannel constructor
-// options (upstream issue #129) and silently decodes 16 channels as stereo.
+// The decoder is eshaz/wasm-audio-decoders' opus-decoder, the published
+// package's own dist (0.7.12, pinned exactly in package.json). Releases
+// before 0.7.12 minified away its multichannel constructor options (upstream
+// issue #129) and silently decoded 16 channels as stereo, which is why this
+// backend once built the decoder from source.
 //
 // CONTRACT. decode(ctx, initBytes, prevBytes, curBytes) resolves to an
 // AudioBuffer holding the decoded samples of prev+cur (prev may be null),
@@ -25,21 +27,32 @@
 // The decoder bundle is NOT imported through the build. It embeds its WASM
 // as a yEnc-encoded string, and any re-encoding pass - babel transcoding,
 // terser normalizing string escapes - corrupts the binary and every decode
-// fails crc32 at init. That is the same trap that forced building it from
-// source in the first place (upstream #129 was the minifier mangling option
-// names; this is the minifier mangling the payload). It ships beside the app
-// bundle as its own file and is loaded verbatim at runtime.
+// fails crc32 at init. That is the same kind of trap as upstream #129, where
+// the minifier mangled the option names; here it would mangle the payload. It
+// ships beside the app bundle as its own file and is loaded verbatim at
+// runtime, and it exposes globalThis['opus-decoder'].
+//
+// The file's name carries a hash of its content (webpack.config.js defines
+// __OPUS_DECODER_FILE__). /dist/ is cached for hours by the CDN and by
+// browsers under a URL with no ?v=, so a changed file under an unchanged name
+// would be served stale, and a page could end up running an app bundle
+// against a decoder file that is not the one it was built with. A hashed name
+// makes that pairing impossible. An unbundled page falls back to the
+// package's own file name.
+function decoderFileName() {
+    return typeof __OPUS_DECODER_FILE__ !== 'undefined' ? __OPUS_DECODER_FILE__ : 'opus-decoder.min.js';
+}
 let _libPromise = null;
 function loadDecoderLib() {
     if (_libPromise) return _libPromise;
     _libPromise = (async function () {
-        if (typeof globalThis !== 'undefined' && globalThis.OpusDecoderLib) return globalThis.OpusDecoderLib;
+        if (typeof globalThis !== 'undefined' && globalThis['opus-decoder']) return globalThis['opus-decoder'];
         if (typeof document !== 'undefined') {
             // served from the same directory as the app bundle
             let base = null;
             const tag = document.querySelector('script[src*="hoast360.bundle"]');
             if (tag && tag.src) base = tag.src;
-            const url = new URL('opus-decoder.bundle.js', base || document.baseURI).href;
+            const url = new URL(decoderFileName(), base || document.baseURI).href;
             await new Promise(function (res, rej) {
                 const el = document.createElement('script');
                 // classic scripts inherit the PAGE's charset; on a page without
@@ -58,11 +71,12 @@ function loadDecoderLib() {
             const fs = await import(/* webpackIgnore: true */ 'node:fs');
             const path = await import(/* webpackIgnore: true */ 'node:path');
             const here = new URL(import.meta.url).pathname;
-            const src = fs.readFileSync(path.join(path.dirname(here), 'opus-decoder.bundle.js'), 'utf8');
-            (0, eval)(src);   // indirect eval: global scope, sets globalThis.OpusDecoderLib
+            const src = fs.readFileSync(path.join(path.dirname(here), '..', 'node_modules',
+                'opus-decoder', 'dist', 'opus-decoder.min.js'), 'utf8');
+            (0, eval)(src);   // indirect eval: global scope, sets globalThis['opus-decoder']
         }
-        if (!globalThis.OpusDecoderLib) throw new Error('opus-decoder.bundle.js loaded but exposed no OpusDecoderLib');
-        return globalThis.OpusDecoderLib;
+        if (!globalThis['opus-decoder']) throw new Error(decoderFileName() + ' loaded but exposed no opus-decoder global');
+        return globalThis['opus-decoder'];
     })();
     return _libPromise;
 }
