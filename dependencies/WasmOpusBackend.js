@@ -45,7 +45,7 @@ function decoderFileName() {
 let _libPromise = null;
 function loadDecoderLib() {
     if (_libPromise) return _libPromise;
-    _libPromise = (async function () {
+    const load = (async function () {
         if (typeof globalThis !== 'undefined' && globalThis['opus-decoder']) return globalThis['opus-decoder'];
         if (typeof document !== 'undefined') {
             // served from the same directory as the app bundle
@@ -78,7 +78,14 @@ function loadDecoderLib() {
         if (!globalThis['opus-decoder']) throw new Error(decoderFileName() + ' loaded but exposed no opus-decoder global');
         return globalThis['opus-decoder'];
     })();
-    return _libPromise;
+    _libPromise = load;
+    // A load that failed must not be remembered. The promise is module-wide, so
+    // one transient error (a 404 while a deploy is half done, a dropped
+    // connection) would otherwise leave every later decode in the page
+    // rejecting with the same error until a reload. Forgetting it lets the
+    // feed's own retry make a fresh attempt.
+    load.catch(function () { if (_libPromise === load) _libPromise = null; });
+    return load;
 }
 
 // ---- fMP4 demux, verbatim from the proven iPhone poc (scratch/ios-probe/
