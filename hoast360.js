@@ -63,11 +63,15 @@ const BUILD_TAG = 'rf55';  // diagnostic badge + gl.maxTextureSize. A hand-set
 const STALL_RELOAD_MS = 60000;
 const STALL_CHECK_INTERVAL_MS = 15000;
 
-// Chromium delays any Web Audio tap on an MSE-fed element by ~2 s (measured:
-// invariant under liveDelay, dash.js buffer targets, captureStream, and
-// element playbackRate). Only Chromium engines get the segment-audio feed;
-// Firefox is already in sync on the element path and unknown engines default
-// to the safe legacy wiring.
+// Chromium's MSE ignores the edit list on the live video track, so it paints
+// the picture early by the edit's net delay (1.6 to 2.0 s measured on live
+// joins; Chromium 537235698, reproduced at mse-edit-list-repro). This was first
+// misread as a ~2 s delay on any Web Audio tap of an MSE-fed element. Chromium
+// engines get the segment-audio feed, which places the audio by that edit
+// (SegmentAudioFeed). Firefox honours the edit list and keeps the element path.
+// Other engines keep it too unless their own decoder fails the multichannel
+// probe in initialize(), as Safari's does; they take the feed with the WASM
+// decoder instead.
 // UA-only test: Firefox and WebKit Safari never carry "Chrome/", while every
 // Chromium build (Chrome, Brave, Edge, HeadlessChrome) does. window.chrome is
 // deliberately NOT required: headless Chromium omits it and would silently
@@ -1071,8 +1075,9 @@ export class HOAST360 {
         this.irUrl = newIrUrl;
         this._setOrderDependentVariables();
 
-        // Segment-audio feed (combined-MPD path): bypasses the MSE element
-        // tap and its fixed ~2 s delay. Decided at the top of initialize()
+        // Segment-audio feed (combined-MPD path): audio is scheduled from the
+        // DASH segments rather than tapped from the element, and placed by the
+        // video's edit list (see IS_CHROMIUM). Decided at the top of initialize()
         // (before src() below, because the beforeinitialize hook reads the
         // flag), where the opus error gates already need the answer.
         // ?legacyaudio forces the old wiring for A/B measurements.
@@ -1232,11 +1237,12 @@ export class HOAST360 {
 
         if (this.mediaUrl.includes(".mpd")) { // in this case audio and video are inside the same mpd
             // Feed mode must not create a MediaElementSource AT ALL: an
-            // MSE-captured element connected anywhere in the graph flips the
-            // whole AudioContext output into Chromium's high-latency path
-            // (measured at the speakers: +1.65 s while the graph-level signal
-            // is in sync), and an unconnected capture freezes the element
-            // clock outright. So in feed mode the element is silenced by
+            // unconnected capture freezes the element clock outright, and a
+            // connected one was measured +1.65 s late at the speakers while
+            // the graph-level signal was in sync. That figure predates the
+            // edit-list diagnosis and matches its offset (see IS_CHROMIUM), so
+            // it is not evidence of a capture latency; it has not been
+            // re-measured since. So in feed mode the element is silenced by
             // pinning muted instead, re-asserted against UI writes; the feed
             // audio level follows the volume slider via masterGain.
             // ?capture restores the captured variant for A/B measurement.

@@ -24,13 +24,18 @@
 
 // SegmentAudioFeed: self-driven audio path for the combined-MPD (live) mode.
 //
-// Chromium delays any Web Audio tap on an MSE-fed media element by a fixed
-// wall-clock span (~2 s), regardless of liveDelay, dash.js buffer targets, the
-// tap API, or element playbackRate. The only fix is to stop feeding the HOA
-// graph from the element: this module taps the audio DASH segments dash.js is
-// already fetching (fragmentLoadingCompleted carries the bytes), decodes them
-// with decodeAudioData, and schedules the decoded N-channel buffers on the
-// AudioContext clock, aligned to the video element's currentTime.
+// Chromium's MSE ignores the edit list on the live video track and paints the
+// picture early by the edit's net delay (Chromium 537235698). This was first
+// misread as a fixed ~2 s delay on any Web Audio tap of an MSE-fed element;
+// each elimination behind that reading (liveDelay, dash.js buffer targets, the
+// tap API, playbackRate) measured only a relative offset. This module feeds the
+// HOA graph from the audio DASH segments dash.js is already fetching
+// (fragmentLoadingCompleted carries the bytes) instead of from the element,
+// decodes them (decodeAudioData, or the WASM backend where the platform cannot
+// decode 16-channel Opus), and schedules the decoded N-channel buffers on the
+// AudioContext clock, aligned to the video element's currentTime and placed
+// earlier by the video's edit list (presentationShiftS), so they match the
+// picture Chromium actually paints.
 //
 // Contract (binding):
 //  - The video element is the sole master clock. This module never writes
