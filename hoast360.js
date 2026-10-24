@@ -218,6 +218,39 @@ videojs.Html5DashJS.hook('beforeinitialize', function (player, mediaPlayer) {
     attachDvrSeekClamp(player);
 });
 
+// TELL VIDEO.JS WHERE LIVE IS. Its live UI (the LIVE button and its dot, the
+// seek bar's right end and 99 % snap, the End key, LiveTracker's first-play
+// catch-up) treats the end of seekable() as where live playback belongs, and
+// video.js's own engine keeps that contract by reporting the playlist end minus
+// the presentation delay. videojs-contrib-dash has no seekable(), so video.js
+// read the element's range, which dash.js sets to [now - timeShiftBufferDepth,
+// now]: the instant the encoder is producing, whose segment is not published
+// yet, while dash.js plays LIVE_DELAY_S behind it. Clicking LIVE jumped about
+// 30 s onto unpublished media, rebuffered about once per 2 s segment and
+// settled 4-6 s behind the edge on a 1-4 s buffer, in Chrome, Firefox and
+// WebKit alike (measured 2026-10-24), and at the intended delay the dot was
+// always grey, inviting the click. This reports the end at dash.js's own target
+// delay instead, for as long as the element reports an infinite duration, which
+// is as long as video.js treats the stream as live. (dash.js's isDynamic() is
+// not the test: it turns false at the switch to a static manifest about 20 s
+// before the element's duration does, and in that window the old wall-clock
+// end came back and a LIVE click seeked past the end of the media.) The
+// element's range is untouched, so dash.js, the browser's seek clamp and
+// attachDvrSeekClamp still see the full window.
+videojs.Html5DashJS.prototype.seekable = function () {
+    const range = this.el_.seekable;
+    let delay = 0;
+    try {
+        if (range.length && this.mediaPlayer_ && this.el_.duration === Infinity) {
+            delay = this.mediaPlayer_.getTargetLiveDelay();
+        }
+    } catch (e) { /* dash.js throws until playback is initialised */ }
+    if (!(delay > 0)) return range;
+    const start = range.start(0);
+    const end = range.end(range.length - 1);
+    return videojs.createTimeRanges(start, Math.max(start, end - delay));
+};
+
 // FAILSAFE, not the fix - the fix is -seg_duration 2 at the earshot muxer
 // (docker-compose.yml, 2026-08-09). The muxer still rounds video up to the
 // next contribution keyframe, so any publisher whose GOP does not divide the
@@ -359,6 +392,19 @@ export class HOAST360 {
         this.videoPlayer = videojs('hoast360-player', {
             html5: { nativeCaptions: false },
             liveui: true,
+            // The window video.js sees is LIVE_DELAY_S shorter (seekable() at the
+            // top of this file), and a cold start begins with about 43 s of it
+            // (the page waits for that much), leaving about 13 s: under the
+            // default 20 s threshold the LIVE button and seek bar never appear.
+            // This also arms LiveTracker's first-play catch-up: a viewer who
+            // waits more than its 15 s tolerance before pressing play is moved
+            // forward to the live point, which seekable() puts at LIVE_DELAY_S,
+            // the intended delay (measured: one wait of up to 2.6 s when the
+            // page sat 30 s or more, because dash.js has not refreshed the
+            // manifest yet). Never lower the threshold without that seekable():
+            // the same catch-up would then send every viewer to the wall-clock
+            // edge (measured).
+            liveTracker: { trackingThreshold: 0 },
             plugins: {
                 httpSourceSelector: { default: 'auto' }
             }
