@@ -1911,7 +1911,13 @@ export class HOAST360 {
             if (scope.xrActive)
                 return;
 
-            scope.rotator.updateRotationFromCamera(scope.videoPlayer.xr().camera.matrixWorld.elements);
+            // OrbitControls fires 'change' after lookAt(), and three's lookAt
+            // refreshes matrixWorld BEFORE it writes the new rotation, so the
+            // matrix read here was one step behind: the last step of every drag
+            // never reached the sound field. Refresh it first.
+            const cam = scope.videoPlayer.xr().camera;
+            cam.updateMatrixWorld();
+            scope.rotator.updateRotationFromCamera(cam.matrixWorld.elements);
         });
 
         // view change if HMD is used
@@ -1939,6 +1945,7 @@ export class HOAST360 {
             if (scope.zoomEnabled)
                 scope._updateZoom();
 
+            this.camera.updateMatrixWorld();
             scope.rotator.updateRotationFromCamera(this.camera.matrixWorld.elements);
         });
 

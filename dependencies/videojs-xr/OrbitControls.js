@@ -256,10 +256,14 @@ var OrbitControls = function ( object, domElement ) {
 				lastPosition.distanceToSquared( scope.object.position ) > EPS ||
 				8 * ( 1 - lastQuaternion.dot( scope.object.quaternion ) ) > EPS ) {
 
+                // HOAST360: 'change' for every update that moved anything, plus
+                // 'zoom' when the zoom changed. This sent 'zoom' INSTEAD of
+                // 'change', and floating-point noise in the radius check above
+                // sets zoomChanged on ordinary rotations, so some view turns
+                // never reached the listener that rotates the sound field.
                 if (zoomChanged)
 					scope.dispatchEvent( zoomEvent );
-				else
-					scope.dispatchEvent( changeEvent );
+				scope.dispatchEvent( changeEvent );
 
 				lastPosition.copy( scope.object.position );
 				lastQuaternion.copy( scope.object.quaternion );
