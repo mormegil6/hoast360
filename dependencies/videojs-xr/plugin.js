@@ -14,6 +14,8 @@
 //    across each quad while the equirect->sphere map is not), worst at the poles.
 //    Applies to ALL content, not just test cards. See the SphereBufferGeometry
 //    call below.
+//  - init() keeps the scene when loadedmetadata fires again on the same video
+//    element (a MediaSource re-attach); see the comment there.
 
 import videojs from 'video.js';
 import WebXRPolyfill from 'webxr-polyfill';
@@ -271,6 +273,16 @@ class Xr extends Plugin {
     }
 
     init() {
+        // A MediaSource re-attach (dash.js's MEDIA_ERR_DECODE recovery,
+        // HOAST360._recoverInPlace) fires loadedmetadata again on the same
+        // <video>. Nothing built here depends on the source, so keep the camera,
+        // controls, renderer and scene: rebuilding them left HOAST360's
+        // listeners on the old controls, and from then on the sound field no
+        // longer followed the view. Only reset() forces a rebuild. 'initialized'
+        // is not re-triggered: HOAST360 wires itself up once.
+        if (this.initialized_ && this.videoTexture && this.videoTexture.image === this.getVideoEl_())
+            return;
+
         this.reset();
 
         this.xrSupported = false;

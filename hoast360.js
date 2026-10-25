@@ -1033,6 +1033,14 @@ export class HOAST360 {
     }
 
     async initialize(newMediaUrl, newIrUrl, newOrder) {
+        // Not re-entrant on a live instance: the xr plugin keeps its scene when
+        // the same <video> loads a new source (see init() in
+        // dependencies/videojs-xr/plugin.js), so a second call would build no
+        // audio graph for it. Call reset() first; the page reloads instead.
+        if (this.videoPlayer.usingPlugin('xr') && this.videoPlayer.xr().initialized_) {
+            console.warn('HOAST360: initialize() called again without reset(); ignored');
+            return;
+        }
         const opus = await this._opusProbe;
         this.opusSupport = opus.ok;
         // The probe judges the PLATFORM decoder, but on the WASM feed the
