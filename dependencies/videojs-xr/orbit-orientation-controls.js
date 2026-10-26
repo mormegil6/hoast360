@@ -7,6 +7,7 @@
 //  - update() waits for the sensor's first real angles, and that first reading
 //    sets the view's elevation to the phone's, keeping its heading; enable()
 //    starts over from the next reading after an XR session
+//  - the heading and tilt steps are taken the short way round (wrapAngle)
 
 import * as THREE from 'three';
 import { OrbitControls } from './OrbitControls.js';
@@ -47,6 +48,20 @@ function Quat2Angle(x, y, z, w) {
     const roll = Math.atan2(2 * x * w - 2 * y * z, 1 - 2 * sqx - 2 * sqz);
 
     return new THREE.Vector3(pitch, roll, yaw);
+}
+
+/**
+ * Shortest signed angle, in (-PI, PI]. Quat2Angle's angles wrap at +-PI, so a
+ * raw difference taken across the wrap is a whole turn, which update() handed
+ * to the orbit as one step. In heading, under the x1.5 gain, that was 540
+ * degrees: the view and the sound field flipped to face backwards once per
+ * turn of the phone. In tilt, a whole turn pins the view at a pole.
+ */
+function wrapAngle(a) {
+    a %= 2 * Math.PI;
+    if (a > Math.PI) a -= 2 * Math.PI;
+    else if (a <= -Math.PI) a += 2 * Math.PI;
+    return a;
 }
 
 class OrbitOrientationControls {
@@ -116,8 +131,8 @@ class OrbitOrientationControls {
                 this.orbit.rotateUp(phi - (Math.PI / 2 + Math.asin(THREE.MathUtils.clamp(look.y, -1, 1))));
             }
 
-            this.orbit.rotateLeft((this.lastAngle_.z - currentAngle.z) * (1 + this.speed));
-            this.orbit.rotateUp((this.lastAngle_.y - currentAngle.y) * (1 + this.speed));
+            this.orbit.rotateLeft(wrapAngle(this.lastAngle_.z - currentAngle.z) * (1 + this.speed));
+            this.orbit.rotateUp(wrapAngle(this.lastAngle_.y - currentAngle.y) * (1 + this.speed));
             this.lastAngle_ = currentAngle;
         }
 
