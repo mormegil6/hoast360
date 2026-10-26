@@ -57,9 +57,23 @@ export default class MatrixMultiplier {
 
         this.mtx = mtx;
 
+        // glide rather than step, and settle once still, for the reasons
+        // HoastRotator.applyRotMtx_ and settleRotMtx_ give
+        const t = this.ctx.currentTime;
         for (var row = 0; row < this.nCh; row++) {       //outputs
             for (var col = 0; col < this.nCh; col++) {	   //inputs
-                this.gain[row][col].gain.value = this.mtx[row][col]; //set new gains
+                this.gain[row][col].gain.setTargetAtTime(this.mtx[row][col], t, 1 / 180); //set new gains
+            }
+        }
+        clearTimeout(this.settleTimer_);
+        this.settleTimer_ = setTimeout(() => this.settleMtx_(), 100);
+    }
+
+    settleMtx_() {
+        const t = this.ctx.currentTime;
+        for (var row = 0; row < this.nCh; row++) {
+            for (var col = 0; col < this.nCh; col++) {
+                this.gain[row][col].gain.setValueAtTime(this.mtx[row][col], t);
             }
         }
     }
