@@ -1982,13 +1982,18 @@ export class HOAST360 {
     }
 
     _setOrderDependentVariables() {
-        let getUrl = window.location;
-        let base_url = getUrl.protocol + "//" + getUrl.host + "/"
         this.numCh = (this.order + 1) * (this.order + 1);
-        
-        if (this.irUrl.includes("://")) // protocol already included
-            this.irs = this.irUrl + 'hoast_o' + this.order + '.wav';
+
+        // irUrl may be a full URL, a path from the site root ('/irs/', as this
+        // project's page passes it) or a path without the leading slash, which
+        // has always meant the same root. Pasting the origin, a slash and
+        // '/irs/' together asked for //irs/hoast_o3.wav: nginx's merge_slashes
+        // hid it, a host that keeps both slashes would not.
+        const file = 'hoast_o' + this.order + '.wav';
+        const root = window.location.protocol + '//' + window.location.host + '/';
+        if (this.irUrl.includes('://')) // protocol already included
+            this.irs = this.irUrl + file;
         else
-            this.irs = base_url + this.irUrl + 'hoast_o' + this.order + '.wav';            
+            this.irs = root + this.irUrl.replace(/^\/+/, '') + file;
     }
 }
