@@ -4,6 +4,9 @@
 //    permission API exists (Android, desktop) it is connected immediately, while on
 //    iOS 13+ connection is deferred to enableOrientation(), which must be called
 //    from a user gesture so DeviceOrientationEvent.requestPermission() succeeds.
+//  - update() waits for the sensor's first real angles, and that first reading
+//    sets the view's elevation to the phone's, keeping its heading; enable()
+//    starts over from the next reading after an XR session
 
 import * as THREE from 'three';
 import { OrbitControls } from './OrbitControls.js';
@@ -95,15 +98,22 @@ class OrbitOrientationControls {
         // an angle change. Then save the angle into orbit so that
         // it will take those into account when it updates the camera and overrides
         // our changes
-        if (this.orientation && this.orientation.enabled) {
+        if (this.orientation && this.orientation.enabled && this.hasOrientationReading_()) {
             this.orientation.update();
 
             const quat = this.orientation.object.quaternion;
             const currentAngle = Quat2Angle(quat.x, quat.y, quat.z, quat.w);
 
-            // we also have to store the last angle since quaternions are b
+            // The first real reading seeds the last angle. The view keeps its
+            // heading (the video's front unless a finger moved it) and takes
+            // the elevation the phone actually points at, so an upright phone
+            // starts at the horizon.
             if (typeof this.lastAngle_ === 'undefined') {
                 this.lastAngle_ = currentAngle;
+                const look = new THREE.Vector3(0, 0, -1).applyQuaternion(quat);
+                const offset = this.object.position.clone().sub(this.orbit.target);
+                const phi = Math.acos(THREE.MathUtils.clamp(offset.y / offset.length(), -1, 1));
+                this.orbit.rotateUp(phi - (Math.PI / 2 + Math.asin(THREE.MathUtils.clamp(look.y, -1, 1))));
             }
 
             this.orbit.rotateLeft((this.lastAngle_.z - currentAngle.z) * (1 + this.speed));
@@ -112,6 +122,18 @@ class OrbitOrientationControls {
         }
 
         this.orbit.update();
+    }
+
+    // Until an event with real angles arrives, DeviceOrientationControls poses
+    // the camera from alpha = beta = gamma = 0, which is straight down. The
+    // sensor starts after the listener is attached, so frames run in that
+    // state, and seeding the last angle from it made the first real event hand
+    // the orbit the phone's whole tilt as one step (90 degrees for an upright
+    // phone, x1.5 = 135), which pinned the view at the zenith. Where the browser
+    // has no sensor data it sends one event with all three angles null.
+    hasOrientationReading_() {
+        const d = this.orientation.deviceOrientation;
+        return !!d && (d.alpha != null || d.beta != null || d.gamma != null);
     }
 
     dispose() {
@@ -125,8 +147,13 @@ class OrbitOrientationControls {
     enable() {
         this.orbit.enabled = true;
 
-        if (this.orientation)
+        if (this.orientation) {
             this.orientation.enabled = this.orientation.connected;
+            // Seed again from the next reading: the phone moved while the
+            // controls were off (during an XR session), and the old last angle
+            // would hand the whole difference to the view as one jump.
+            this.lastAngle_ = undefined;
+        }
     }
 
     disable() {
