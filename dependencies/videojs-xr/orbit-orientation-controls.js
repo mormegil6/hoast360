@@ -8,6 +8,8 @@
 //    sets the view's elevation to the phone's, keeping its heading; enable()
 //    starts over from the next reading after an XR session
 //  - the heading and tilt steps are taken the short way round (wrapAngle)
+//  - the phone turns the view by its own motion; upstream multiplied it by
+//    1 + speed, which now sets only the drag rate for fingers and the mouse
 
 import * as THREE from 'three';
 import { OrbitControls } from './OrbitControls.js';
@@ -53,9 +55,10 @@ function Quat2Angle(x, y, z, w) {
 /**
  * Shortest signed angle, in (-PI, PI]. Quat2Angle's angles wrap at +-PI, so a
  * raw difference taken across the wrap is a whole turn, which update() handed
- * to the orbit as one step. In heading, under the x1.5 gain, that was 540
- * degrees: the view and the sound field flipped to face backwards once per
- * turn of the phone. In tilt, a whole turn pins the view at a pole.
+ * to the orbit as one step. In heading, under the x1.5 gain update() used to
+ * apply, that was 540 degrees: the view and the sound field flipped to face
+ * backwards once per turn of the phone. In tilt, a whole turn pins the view at
+ * a pole.
  */
 function wrapAngle(a) {
     a %= 2 * Math.PI;
@@ -70,6 +73,8 @@ class OrbitOrientationControls {
         this.domElement = options.canvas;
         this.orbit = new OrbitControls(this.object, this.domElement);
 
+        // the speed of finger and mouse drags; the phone's own motion turns
+        // the view 1:1 (see update())
         this.speed = 0.5;
         this.orbit.target.set(0, 1, -1);
         this.orbit.enableZoom = true;
@@ -122,7 +127,7 @@ class OrbitOrientationControls {
             // The first real reading seeds the last angle. The view keeps its
             // heading (the video's front unless a finger moved it) and takes
             // the elevation the phone actually points at, so an upright phone
-            // starts at the horizon.
+            // starts at the horizon; from then on it follows the phone 1:1.
             if (typeof this.lastAngle_ === 'undefined') {
                 this.lastAngle_ = currentAngle;
                 const look = new THREE.Vector3(0, 0, -1).applyQuaternion(quat);
@@ -131,8 +136,14 @@ class OrbitOrientationControls {
                 this.orbit.rotateUp(phi - (Math.PI / 2 + Math.asin(THREE.MathUtils.clamp(look.y, -1, 1))));
             }
 
-            this.orbit.rotateLeft(wrapAngle(this.lastAngle_.z - currentAngle.z) * (1 + this.speed));
-            this.orbit.rotateUp(wrapAngle(this.lastAngle_.y - currentAngle.y) * (1 + this.speed));
+            // The steps are the change in Quat2Angle's heading and bank, which
+            // follow the look direction only while the phone is held the way
+            // its screen is turned and the bank stays within +-90 degrees.
+            // Turning the phone to landscape swings the view until the browser
+            // reports the new screen angle, and tilting past a pole leaves the
+            // view off by the overshoot until a drag brings it back.
+            this.orbit.rotateLeft(wrapAngle(this.lastAngle_.z - currentAngle.z));
+            this.orbit.rotateUp(wrapAngle(this.lastAngle_.y - currentAngle.y));
             this.lastAngle_ = currentAngle;
         }
 
@@ -144,8 +155,9 @@ class OrbitOrientationControls {
     // sensor starts after the listener is attached, so frames run in that
     // state, and seeding the last angle from it made the first real event hand
     // the orbit the phone's whole tilt as one step (90 degrees for an upright
-    // phone, x1.5 = 135), which pinned the view at the zenith. Where the browser
-    // has no sensor data it sends one event with all three angles null.
+    // phone, 135 under the old x1.5 gain), which pinned the view at the zenith.
+    // Where the browser has no sensor data it sends one event with all three
+    // angles null.
     hasOrientationReading_() {
         const d = this.orientation.deviceOrientation;
         return !!d && (d.alpha != null || d.beta != null || d.gamma != null);
