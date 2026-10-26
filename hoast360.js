@@ -1913,8 +1913,12 @@ export class HOAST360 {
 
             // OrbitControls fires 'change' after lookAt(), and three's lookAt
             // refreshes matrixWorld BEFORE it writes the new rotation, so the
-            // matrix read here was one step behind: the last step of every drag
-            // never reached the sound field. Refresh it first.
+            // matrix read here was the camera's previous pose: one step behind
+            // for a drag, and on a phone with the gyro the raw phone pose that
+            // DeviceOrientationControls had just written, which turns 1:1 with
+            // the phone and carries its roll. A finger drag then made the sound
+            // field alternate between that and the view, every other frame.
+            // Refresh it first.
             const cam = scope.videoPlayer.xr().camera;
             cam.updateMatrixWorld();
             scope.rotator.updateRotationFromCamera(cam.matrixWorld.elements);
