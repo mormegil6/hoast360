@@ -1949,6 +1949,17 @@ export class HOAST360 {
             scope.rotator.updateRotationFromCamera(this.camera.matrixWorld.elements);
         });
 
+        // The 'change' listener only hears the view change from here on. A phone
+        // whose first sensor reading came before setup (Android connects the
+        // sensor at loadedmetadata) and that then rests still never sends one,
+        // so the sound field would face front and level while the picture shows
+        // the phone's tilt, until the phone moved. Hand it the current view once.
+        if (!this.xrActive) {
+            const cam = this.videoPlayer.xr().camera;
+            cam.updateMatrixWorld();
+            this.rotator.updateRotationFromCamera(cam.matrixWorld.elements);
+        }
+
         this.videoSetupComplete = true;
     }
 
