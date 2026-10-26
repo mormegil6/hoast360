@@ -251,6 +251,30 @@ videojs.Html5DashJS.prototype.seekable = function () {
     return videojs.createTimeRanges(start, Math.max(start, end - delay));
 };
 
+// KEYBOARD STEPS STOP AT THE LIVE POINT TOO. With the seek bar focused, the
+// Right and Up arrows add 5 s to currentTime and PageUp adds 60 s, with no
+// upper bound (video.js SeekBar.stepForward and handleKeyDown), while the LIVE
+// button, End, a drag to the right end and the number keys all stop at
+// liveTracker.liveCurrentTime(), which since the seekable() patch above is
+// where dash.js plays. On a live stream a step past it landed at the wall-clock
+// edge, whose segments are not published yet, and rebuffered there the way a
+// LIVE click did before that patch. This middleware caps every seek video.js
+// makes at the live point while the stream is live; VOD seeks pass untouched.
+videojs.use('*', function (player) {
+    return {
+        setCurrentTime: function (t) {
+            try {
+                const lt = player.liveTracker;
+                if (lt && lt.isLive()) {
+                    const live = lt.liveCurrentTime();
+                    if (isFinite(live) && t > live) return live;
+                }
+            } catch (e) { /* a failed cap must never block a seek */ }
+            return t;
+        }
+    };
+});
+
 // FAILSAFE, not the fix - the fix is -seg_duration 2 at the earshot muxer
 // (docker-compose.yml, 2026-08-09). The muxer still rounds video up to the
 // next contribution keyframe, so any publisher whose GOP does not divide the
