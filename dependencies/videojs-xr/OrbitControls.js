@@ -192,11 +192,14 @@ var OrbitControls = function ( object, domElement ) {
 			if (scope.currentDistance >= 0)
 			{
 				var newRad = scope.currentDistance;
-				if (spherical.radius != newRad)
-				{
-					spherical.radius = scope.currentDistance;
+				// HOAST360: spherical.radius is recomputed from the camera offset
+				// on every update, so it differs from the set distance by rounding
+				// alone. Compared exactly, that marked anywhere from almost none to
+				// more than half of the steps of a turn or tilt as a zoom, depending
+				// on the distance, and every frame of a still view at some poses.
+				if (Math.abs(spherical.radius - newRad) > 1e-6)
 					zoomChanged = true;
-				}
+				spherical.radius = newRad;
 			}
 			else // simulate very close zoom by changing fov
 			{
@@ -259,7 +262,7 @@ var OrbitControls = function ( object, domElement ) {
                 // HOAST360: 'change' for every update that moved anything, plus
                 // 'zoom' when the zoom changed. This sent 'zoom' INSTEAD of
                 // 'change', and floating-point noise in the radius check above
-                // sets zoomChanged on ordinary rotations, so some view turns
+                // set zoomChanged on ordinary rotations, so some view turns
                 // never reached the listener that rotates the sound field.
                 if (zoomChanged)
 					scope.dispatchEvent( zoomEvent );
