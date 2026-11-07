@@ -62,7 +62,7 @@ const DEADBAND_S = 0.020;    // |drift| below this: do nothing
 const STEP_MAX_S = 0.005;    // max schedule-time correction per chunk boundary
 const HARD_RESYNC_S = 0.100; // |drift| above this: flush and re-anchor
 const FADE_S = 0.003;        // micro-fade at corrections, holes, run starts
-const RAMP_S = 0.020;        // feedBus mute ramp for flushes
+const RAMP_S = 0.020;        // fade-out of the run's bus at a flush (see _flush)
 const STALL_FADE_S = 0.050;  // slower fade when the element stalls
 const PUMP_MS = 500;         // scheduler tick; also woken by events
 const START_LEAD_S = 0.08;   // scheduling lead when starting a run
@@ -106,7 +106,8 @@ export default class SegmentAudioFeed {
         this.onDegrade = opts.onDegrade || function () { };
 
         this.feedBus = this.ctx.createGain();
-        this.feedBus.gain.value = 1;
+        this.feedBus.gain.value = 1;   // and it stays at one: a flush fades the run's own bus (see _flush)
+        this.runBus = null;            // this run's GainNode into feedBus, made on its first node
 
         this.epoch = 0;
         this.presentationShiftS = 0; // video elst delay Chromium ignores (audio placed earlier by this)
@@ -1327,7 +1328,8 @@ export default class SegmentAudioFeed {
         const src = this.ctx.createBufferSource();
         src.buffer = rec.buffer;
         const g = this.ctx.createGain();
-        src.connect(g); g.connect(this.feedBus);
+        if (!this.runBus) this.runBus = this._newRunBus();
+        src.connect(g); g.connect(this.runBus);
         const preS = rec.preS || 0;
         // CROSSFADED JOIN. When this chunk carries pre-roll (identical, by
         // pair-decode, to the previous chunk's tail), start it preS early and
@@ -1513,15 +1515,57 @@ export default class SegmentAudioFeed {
 
     // ---- flush / degrade / prune -------------------------------------------
 
+    // ONE BUS PER RUN, FADED ONCE AND THROWN AWAY. A flush used to ramp the
+    // shared feedBus.gain to zero and schedule it back to one 5 ms after the
+    // ramp. A seek runs several flushes close together ('seeking', then the
+    // clock-jump rebuild and _resume() as 'playing' arrives), and when the
+    // later ones landed after the first one's ramp had ended but before its
+    // re-open, the bus stayed at zero: every later chunk was scheduled,
+    // anchored and played into a muted bus, with drift near zero and nothing
+    // wrong in any counter. Seen on 2026-11-07 in headless, muted Chrome 156 on
+    // a 24 s test clip looped by seeking back to 12.25 s, inside an audio
+    // chunk: 'seeked' came 16 to 21 ms after 'seeking' and the bus read zero
+    // after 8 of 10 of those seeks, through the rest of the pass in all 4
+    // followed that far. Seeks to the chunk start ('seeked' within 10 ms) left
+    // it at one in 6 of 6. A bare GainNode given the same calls at the same
+    // 21 ms spacing re-opened every time, so what made the re-open fail is not
+    // known.
+    // So nothing re-opens a bus any more. Each run's nodes go through a fresh
+    // GainNode (created on the run's first node, _newRunBus); a flush gives it
+    // one ramp from the value it has now, anchored at now, drops it, and
+    // disconnects it after the fade. The nodes' own crossfades carry on under
+    // the fade exactly as they did under the old shared one, and feedBus stays
+    // at one. Fading each node's own gain instead was tried and is worse:
+    // cancelAndHoldAtTime adds no event at now on a node whose last event is in
+    // the past, so the ramp starts from that old event and the gain falls in
+    // one sample (rendered in Chrome 156: 1 to 0.03, a click), and nodes that
+    // start inside the fade window lose their crossfade.
+    _newRunBus() {
+        const bus = this.ctx.createGain();
+        bus.gain.value = 1;
+        if (this.N > 0) {
+            bus.channelCount = this.N;
+            bus.channelCountMode = 'explicit';
+            bus.channelInterpretation = 'discrete';
+        }
+        bus.connect(this.feedBus);
+        return bus;
+    }
+
     _flush(fadeS) {
         const now = this.ctx.currentTime;
-        const g = this.feedBus.gain;
-        try {
-            g.cancelScheduledValues(now);
-            g.setValueAtTime(g.value, now);
-            g.linearRampToValueAtTime(0, now + fadeS);
-            g.setValueAtTime(1, now + fadeS + 0.005); // re-open for the next run
-        } catch (e) { /* already detached */ }
+        const bus = this.runBus;
+        this.runBus = null;
+        if (bus) {
+            const p = bus.gain;
+            try {
+                // this bus's gain has never moved from its initial one, so its value is exact
+                p.setValueAtTime(p.value, now);
+                if (fadeS > 0) p.linearRampToValueAtTime(0, now + fadeS);
+                else p.setValueAtTime(0, now);
+            } catch (e) { /* already detached */ }
+            setTimeout(function () { try { bus.disconnect(); } catch (e) { /* already detached */ } }, (fadeS + 0.05) * 1000);
+        }
         const nodes = this.nodes;
         this.nodes = [];
         const stopAt = now + fadeS + 0.002;
