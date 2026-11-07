@@ -1246,6 +1246,18 @@ export default class SegmentAudioFeed {
                 this.nextCtx += (next.dur - into);
                 continue;
             }
+            // A CHUNK THAT IS FETCHED BUT NOT DECODED YET IS NOT A HOLE. After a
+            // loop wrap the chain restarts at zero while the decoded set still
+            // holds chunks from the end of the previous pass (and decodes finish
+            // out of order, two at a time). Treating the not-yet-decoded
+            // chunk as a hole made the junction jump to one of those later
+            // chunks and skip the real content in between as silence: every
+            // pass after the first lost 6 to 8 seconds at fixed positions,
+            // including most of the second half. Wait for the decode instead;
+            // the pump runs again when it lands. A chunk whose decode already
+            // failed once is not waited for, so a bad chunk cannot hold the
+            // chain for ever.
+            if (this._decodePendingAt(this.nextT)) break;
             // hole handling: if a later chunk exists, jump the junction to it
             // (time-addressed silence exactly spanning the hole); never butt-
             // chain across a hole or all later audio slides off sync
@@ -1286,6 +1298,20 @@ export default class SegmentAudioFeed {
             if (Math.abs(rec.t - mediaT) <= JOIN_TOL_S) found = rec;
         });
         return found;
+    }
+
+    // True when the encoded ring holds a chunk that starts at mediaT (within the
+    // join tolerance) and has no decoded form yet, and its decode has not
+    // already failed. Such a chunk is on its way, so the junction waits for it.
+    _decodePendingAt(mediaT) {
+        for (let i = 0; i < this.ring.length; i++) {
+            const entry = this.ring[i];
+            if (Math.abs(entry.t - mediaT) > JOIN_TOL_S) continue;
+            const key = this._key(entry.epoch, entry.t);
+            if (this.decoded.has(key) || this.retried.has(key)) continue;
+            return true;
+        }
+        return false;
     }
 
     _decodedAfter(fromT, toT) {
