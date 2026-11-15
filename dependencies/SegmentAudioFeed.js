@@ -24,8 +24,9 @@
 
 // SegmentAudioFeed: self-driven audio path for the combined-MPD (live) mode.
 //
-// Chromium's MSE ignores the edit list on the live video track and paints the
-// picture early by the edit's net delay (Chromium 537235698). This was first
+// Released Chromium's MSE ignores the edit list on the live video track and
+// paints the picture early by the edit's net delay (Chromium 537235698, fixed
+// from M159; EmptyEditProbe measures which behaviour this engine has). This was first
 // misread as a fixed ~2 s delay on any Web Audio tap of an MSE-fed element;
 // each elimination behind that reading (liveDelay, dash.js buffer targets, the
 // tap API, playbackRate) measured only a relative offset. This module feeds the
@@ -34,8 +35,8 @@
 // decodes them (decodeAudioData, or the WASM backend where the platform cannot
 // decode 16-channel Opus), and schedules the decoded N-channel buffers on the
 // AudioContext clock, aligned to the video element's currentTime and placed
-// earlier by the video's edit list (presentationShiftS), so they match the
-// picture Chromium actually paints.
+// earlier by the part of the video's edit list the engine does not apply
+// (presentationShiftS), so they match the picture it actually paints.
 //
 // Contract (binding):
 //  - The video element is the sole master clock. This module never writes
@@ -54,6 +55,8 @@
 // hardcoded; the host derives the ambisonic order from it.
 
 "use strict";
+
+import { probeEmptyEdit, MODELS as EDIT_MODELS } from './EmptyEditProbe.js';
 
 const HORIZON_S = 12;        // decode + schedule this far ahead of the playhead
 const RING_BACK_S = 30;      // encoded ring span behind the playhead
@@ -110,8 +113,19 @@ export default class SegmentAudioFeed {
         this.runBus = null;            // this run's GainNode into feedBus, made on its first node
 
         this.epoch = 0;
-        this.presentationShiftS = 0; // video elst delay Chromium ignores (audio placed earlier by this)
-        this.inits = new Map();      // representationId -> { bytes, epoch, timecodeScale }
+        this.presentationShiftS = 0; // video elst delay the engine does not apply (audio placed earlier by this)
+        this.elstEdit = null;        // { emptyS, trimS } from the latest video init that had an edit list
+        this.engineEdit = null;      // how this engine's MSE applies such an edit list (EmptyEditProbe)
+        let scope = this;
+        probeEmptyEdit().then(function (r) {
+            scope.engineEditProbe = r;
+            if (scope.destroyed) return;
+            if (!r.model) console.warn('SegmentAudioFeed: empty-edit probe gave no model (' + r.reason
+                + ', buffered start ' + r.startS + '); assuming the edit list is ignored');
+            scope.engineEdit = r.model;
+            scope._applyShift();
+        });
+        this.inits = new Map();     // representationId -> { bytes, epoch, timecodeScale }
         this.ring = [];              // { epoch, t, dur, bytes } sorted by t
         this.decoded = new Map();    // key -> { t, dur, buffer, lastUse }
         this.inflight = new Set();
@@ -252,6 +266,8 @@ export default class SegmentAudioFeed {
             ringT1: this.ring.length ? Math.round(this.ring[this.ring.length - 1].t + this.ring[this.ring.length - 1].dur) : null,
             outputLatency: Math.round(this.outputLatency * 1000),
             presentationShiftMs: Math.round(this.presentationShiftS * 1000),
+            elstEdit: this.elstEdit,
+            engineEdit: this.engineEditProbe || null,
             // the design's per-epoch sanity constant: content axis (cluster
             // timestamp) minus placement axis (request.startTime) for the
             // newest ring entry; a large constant here means dash.js's segment
@@ -261,12 +277,13 @@ export default class SegmentAudioFeed {
         };
     }
 
-    // Net presentation delay from an fMP4 init segment's edit list: an empty
-    // edit (media_time -1) delays the track by duration/movieTimescale, and
-    // the first real edit's media_time trims head media. Firefox applies
-    // this; Chromium MSE does not, so Chromium presents the track early by
-    // the returned amount. Returns null when there is no edit list.
-    _parseElstShiftS(b) {
+    // The edit list of an fMP4 init segment: empty edits (media_time -1) delay
+    // the track by their duration in the movie timescale (emptyS), and the
+    // first real edit's media_time trims head media, in the track timescale
+    // (trimS). The net presentation delay is emptyS - trimS. Returns null when
+    // there is no edit list. How much of it the engine applies is measured by
+    // EmptyEditProbe (see _applyShift).
+    _parseElst(b) {
         function u32(o) { return ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0; }
         function find(fourcc, from) {
             for (let i = from; i < b.length - 4; i++)
@@ -283,7 +300,7 @@ export default class SegmentAudioFeed {
         if (mdhd > 0) mediaTs = u32(mdhd + 4 + (b[mdhd + 4] === 1 ? 20 : 12)) || 90000;
         const ver = b[elst + 4];
         const count = u32(elst + 8);
-        let p = elst + 12, shift = 0;
+        let p = elst + 12, emptyS = 0, trimS = 0;
         for (let i = 0; i < count && p + (ver === 1 ? 20 : 12) <= b.length; i++) {
             let dur, mt;
             if (ver === 1) {
@@ -296,15 +313,31 @@ export default class SegmentAudioFeed {
                 mt = u32(p + 4); if (mt === 0xFFFFFFFF) mt = -1;
                 p += 12;
             }
-            if (mt === -1) shift += dur / movieTs;
-            else { shift -= mt / mediaTs; break; }
+            if (mt === -1) emptyS += dur / movieTs;
+            else { trimS = mt / mediaTs; break; }
         }
-        return shift;
+        return { emptyS: emptyS, trimS: trimS };
+    }
+
+    // presentationShiftS = the part of the edit list's net delay that this
+    // engine does not apply, which is how early it paints the picture. Until
+    // the probe answers, and if it cannot classify the engine, the edit list
+    // is assumed ignored, which is what every released Chromium and Safari did
+    // when this feed was written.
+    _applyShift() {
+        if (!this.elstEdit) return;
+        const e = this.elstEdit.emptyS, m = this.elstEdit.trimS;
+        const model = EDIT_MODELS[this.engineEdit] || EDIT_MODELS['none'];
+        const shift = (e - m) - model.applied(e, m);
+        if (Math.abs(shift - this.presentationShiftS) > 0.001) {
+            this.presentationShiftS = shift;
+            if (this.anchor !== null) this._hardResync('elst-shift');
+        }
     }
 
     _masterTime(el) {
-        // what Chromium actually displays: currentTime plus the edit-list
-        // delay it ignored; audio chases the picture, not the DASH clock
+        // what the engine actually displays: currentTime plus the edit-list
+        // delay it did not apply; audio chases the picture, not the DASH clock
         return el.currentTime + this.presentationShiftS;
     }
 
@@ -755,12 +788,14 @@ export default class SegmentAudioFeed {
         if (!e || e.error || !e.response || !e.request) return;
         const r = e.request;
 
-        // Video init segments carry the key to Chromium's constant A/V skew:
-        // ffmpeg dashenc expresses the contribution's video start delay as an
-        // edit list (empty edit + media offset). Firefox honors it; Chromium's
-        // MSE ignores edit lists, so Chromium paints video EARLY by exactly
-        // the edit's net delay. Audio must be placed that much earlier to
-        // match what Chromium actually displays.
+        // Video init segments carry the key to a constant A/V skew: ffmpeg
+        // dashenc expresses the contribution's video start delay as an edit
+        // list (empty edit + media offset). An engine whose MSE does not apply
+        // it (released Chromium and Safari) paints the video EARLY by the
+        // edit's net delay, and the audio must be placed that much earlier to
+        // match what it actually displays. One that applies it (Firefox,
+        // Chromium from M159) needs no shift; _applyShift decides by the
+        // engine's measured behaviour.
         if (this.selfFetchAudio && (r.mediaType || '') === 'video' && r.type === 'MediaSegment') {
             this._sfOnVideoFrag(r);
             // fall through: video media frags carry nothing else the feed wants
@@ -771,10 +806,10 @@ export default class SegmentAudioFeed {
                 this._sf = null;
                 this._selfFetchSetup(this.mp);
             }
-            const shift = this._parseElstShiftS(new Uint8Array(e.response));
-            if (shift != null && Math.abs(shift - this.presentationShiftS) > 0.001) {
-                this.presentationShiftS = shift;
-                if (this.anchor !== null) this._hardResync('elst-shift');
+            const edit = this._parseElst(new Uint8Array(e.response));
+            if (edit) {
+                this.elstEdit = edit;
+                this._applyShift();
             }
             return;
         }

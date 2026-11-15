@@ -63,12 +63,14 @@ const BUILD_TAG = 'rf55';  // diagnostic badge + gl.maxTextureSize. A hand-set
 const STALL_RELOAD_MS = 60000;
 const STALL_CHECK_INTERVAL_MS = 15000;
 
-// Chromium's MSE ignores the edit list on the live video track, so it paints
-// the picture early by the edit's net delay (1.6 to 2.0 s measured on live
-// joins; Chromium 537235698, reproduced at mse-edit-list-repro). This was first
-// misread as a ~2 s delay on any Web Audio tap of an MSE-fed element. Chromium
-// engines get the segment-audio feed, which places the audio by that edit
-// (SegmentAudioFeed). Firefox honours the edit list and keeps the element path.
+// Released Chromium's MSE ignores the edit list on the live video track, so it
+// paints the picture early by the edit's net delay (1.6 to 2.0 s measured on
+// live joins; Chromium 537235698, reproduced at mse-edit-list-repro, fixed from
+// M159). This was first misread as a ~2 s delay on any Web Audio tap of an
+// MSE-fed element. Chromium engines get the segment-audio feed, which places
+// the audio by whatever part of that edit the engine does not apply, as
+// measured by EmptyEditProbe (SegmentAudioFeed). Firefox honours the edit list
+// and keeps the element path.
 // Other engines keep it too unless their own decoder fails the multichannel
 // probe in initialize(), as Safari's does; they take the feed with the WASM
 // decoder instead.
