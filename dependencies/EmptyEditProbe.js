@@ -23,6 +23,16 @@
 // Anything else, or no answer within the timeout, resolves model null, and the
 // feed keeps its long-standing assumption ("none").
 //
+// A second clip measures a list that is only the trimming edit [ media from
+// 0.125 s ], because an engine that skips a list with a leading empty edit can
+// still apply a plain trimming edit (Chrome 157 and Safari 27.2 do, which left
+// the audio late by the whole trim until the feed read this, 2026-11-21). Its
+// first frame is at media time 0.25 s, past the trim point, so no frame is cut
+// and an engine that keeps a partly trimmed frame (Firefox) reads the same as
+// one that drops it. The buffered start tells the two apart:
+//   ignored     0.25   the trimming edit is not applied
+//   applied     0.125  the trimming edit is applied
+//
 // Measured 2026-11-15, three runs each, all identical: "none" on Chrome
 // 157.0.8103.79, Brave 157, Edge 157 and Safari 27.2 (macOS 15.8); "all" on
 // Chrome Canary 160.0.8163.0 and on Firefox 161 and 162. Canary with
@@ -30,6 +40,8 @@
 // "none" again, so the probe sees exactly that change.
 
 const INIT_B64 = 'AAAAHGZ0eXBpc281AAACAGlzbzVpc282bXA0MQAAAyptb292AAAAbG12aGQAAAAAAAAAAAAAAAAAAAPoAAAAAAABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAACLXRyYWsAAABcdGtoZAAAAAMAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAQAAAAEAAAAAAADBlZHRzAAAAKGVsc3QAAAAAAAAAAgAAA+j/////AAEAAAAAAAAAAAgAAAEAAAAAAZltZGlhAAAAIG1kaGQAAAAAAAAAAAAAAAAAAEAAAAAAAFXEAAAAAAAtaGRscgAAAAAAAAAAdmlkZQAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAFEbWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAABBHN0YmwAAAC4c3RzZAAAAAAAAAABAAAAqGF2YzEAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAQABAAEgAAABIAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY//8AAAAuYXZjQwFCwAr/4QAWZ0LACtxCbARAAAADAEAAAAMCA8SJ4AEABWjODyyAAAAAEHBhc3AAAAABAAAAAQAAABRidHJ0AAAAAAAAFrAAABawAAAAEHN0dHMAAAAAAAAAAAAAABBzdHNjAAAAAAAAAAAAAAAUc3RzegAAAAAAAAAAAAAAAAAAABBzdGNvAAAAAAAAAAAAAAAobXZleAAAACB0cmV4AAAAAAAAAAEAAAABAAAAAAAAAAAAAAAAAAAAYXVkdGEAAABZbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAsaWxzdAAAACSpdG9vAAAAHGRhdGEAAAABAAAAAExhdmY2My4xLjEwMg==';
+const INIT_TRIM_B64 = 'AAAAHGZ0eXBpc281AAACAGlzbzVpc282bXA0MQAAAx5tb292AAAAbG12aGQAAAAAAAAAAAAAAAAAAAPoAAAAAAABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAACIXRyYWsAAABcdGtoZAAAAAMAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAQAAAAEAAAAAAACRlZHRzAAAAHGVsc3QAAAAAAAAAAQAAAAAAAAgAAAEAAAAAAZltZGlhAAAAIG1kaGQAAAAAAAAAAAAAAAAAAEAAAAAAAFXEAAAAAAAtaGRscgAAAAAAAAAAdmlkZQAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAFEbWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAABBHN0YmwAAAC4c3RzZAAAAAAAAAABAAAAqGF2YzEAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAQABAAEgAAABIAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY//8AAAAuYXZjQwFCwAr/4QAWZ0LACtxCbARAAAADAEAAAAMCA8SJ4AEABWjODyyAAAAAEHBhc3AAAAABAAAAAQAAABRidHJ0AAAAAAAAFrAAABawAAAAEHN0dHMAAAAAAAAAAAAAABBzdHNjAAAAAAAAAAAAAAAUc3RzegAAAAAAAAAAAAAAAAAAABBzdGNvAAAAAAAAAAAAAAAobXZleAAAACB0cmV4AAAAAAAAAAEAAAABAAAAAAAAAAAAAAAAAAAAYXVkdGEAAABZbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAsaWxzdAAAACSpdG9vAAAAHGRhdGEAAAABAAAAAExhdmY2My4xLjEwMg==';
+const MEDIA_LATE_B64 = 'AAAAGHN0eXBtc2RoAAAAAG1zZGhtc2l4AAAANHNpZHgBAAAAAAAAAQAAQAAAAAAAAAAQAAAAAAAAAAAAAAAAAQAAA1IAAEAAgAAAAAAAAHRtb29mAAAAEG1maGQAAAAAAAAAAQAAAFx0cmFmAAAAHHRmaGQAAgA4AAAAAQAAEAAAAAJ8AgAAAAAAABR0ZmR0AQAAAAAAAAAAABAAAAAAJHRydW4AAAIBAAAABAAAAHwAAAJ8AAAAHgAAAB4AAAAeAAAC3m1kYXQAAAJdBgX//1ncRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY1IHIzMjIyIGIzNTYwNWEgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MCByZWY9MSBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgxOjB4MTExIG1lPWhleCBzdWJtZT03IHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVmPTAgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0xIDh4OGRjdD0wIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PS0yIHRocmVhZHM9MiBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTAgd2VpZ2h0cD0wIGtleWludD0xIGtleWludF9taW49MSBzY2VuZWN1dD0wIGludHJhX3JlZnJlc2g9MCByYz1jcmYgbWJ0cmVlPTAgY3JmPTIzLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MToxLjAwAIAAAAAXZYiEBLyYoAA4oycnJ1111111111114AAAAAaZYiCAX///8PRQABV58nJyddddddddddddeAAAAAaZYiEBf///w9FAAFXnycnJ1111111111114AAAAAaZYiCAX///8PRQABV58nJyddddddddddddeA=';
 const MEDIA_B64 = 'AAAAGHN0eXBtc2RoAAAAAG1zZGhtc2l4AAAANHNpZHgBAAAAAAAAAQAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAA1IAAEAAgAAAAAAAAHRtb29mAAAAEG1maGQAAAAAAAAAAQAAAFx0cmFmAAAAHHRmaGQAAgA4AAAAAQAAEAAAAAJ8AgAAAAAAABR0ZmR0AQAAAAAAAAAAAAAAAAAAJHRydW4AAAIBAAAABAAAAHwAAAJ8AAAAHgAAAB4AAAAeAAAC3m1kYXQAAAJdBgX//1ncRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY1IHIzMjIyIGIzNTYwNWEgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MCByZWY9MSBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgxOjB4MTExIG1lPWhleCBzdWJtZT03IHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVmPTAgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0xIDh4OGRjdD0wIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PS0yIHRocmVhZHM9MiBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTAgd2VpZ2h0cD0wIGtleWludD0xIGtleWludF9taW49MSBzY2VuZWN1dD0wIGludHJhX3JlZnJlc2g9MCByYz1jcmYgbWJ0cmVlPTAgY3JmPTIzLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MToxLjAwAIAAAAAXZYiEBLyYoAA4oycnJ1111111111114AAAAAaZYiCAX///8PRQABV58nJyddddddddddddeAAAAAaZYiEBf///w9FAAFXnycnJ1111111111114AAAAAaZYiCAX///8PRQABV58nJyddddddddddddeA=';
 const CODEC = 'video/mp4; codecs="avc1.42c00a"';
 const E_S = 1.0, M_S = 0.125, FRAME_S = 0.25, TOL_S = 0.03, TIMEOUT_MS = 4000;
@@ -55,12 +67,25 @@ export function classify(startS) {
     return null;
 }
 
+// applied(m): the presentation delay the engine gives a track whose edit list
+// is a trimming edit alone, media from m seconds
+export const TRIM_MODELS = {
+    'ignored': { starts: [FRAME_S],            applied: function () { return 0; } },
+    'applied': { starts: [FRAME_S - M_S],     applied: function (m) { return -m; } },
+};
+
+export function classifyTrim(startS) {
+    for (const name in TRIM_MODELS)
+        if (TRIM_MODELS[name].starts.some(function (s) { return Math.abs(startS - s) <= TOL_S; })) return name;
+    return null;
+}
+
 let cached = null;
 
-// Resolves { model, startS, reason }; never rejects. One probe per page.
-export function probeEmptyEdit() {
-    if (cached) return cached;
-    cached = new Promise(function (resolve) {
+// One measurement: appends the clip with the given init segment and classifies
+// where the engine put it. Resolves { model, startS, reason }; never rejects.
+function probeOnce(initB64, mediaB64, classifyFn) {
+    return new Promise(function (resolve) {
         const MS = (typeof window !== 'undefined') && (window.MediaSource || window.ManagedMediaSource);
         if (!MS || !MS.isTypeSupported || !MS.isTypeSupported(CODEC)) {
             resolve({ model: null, startS: null, reason: 'no-mse' });
@@ -83,7 +108,7 @@ export function probeEmptyEdit() {
         ms.addEventListener('sourceopen', function () {
             let sb;
             try { sb = ms.addSourceBuffer(CODEC); } catch (e) { finish({ model: null, startS: null, reason: 'addSourceBuffer' }); return; }
-            const parts = [bytes(INIT_B64), bytes(MEDIA_B64)];
+            const parts = [bytes(initB64), bytes(mediaB64)];
             function next() {
                 if (parts.length) {
                     try { sb.appendBuffer(parts.shift()); } catch (e) { finish({ model: null, startS: null, reason: 'append' }); }
@@ -91,7 +116,7 @@ export function probeEmptyEdit() {
                 }
                 if (!sb.buffered.length) { finish({ model: null, startS: null, reason: 'nothing-buffered' }); return; }
                 const startS = +sb.buffered.start(0).toFixed(4);
-                const model = classify(startS);
+                const model = classifyFn(startS);
                 finish({ model: model, startS: startS, reason: model ? 'measured' : 'unrecognised' });
             }
             sb.addEventListener('updateend', next);
@@ -101,5 +126,14 @@ export function probeEmptyEdit() {
         url = URL.createObjectURL(ms);
         video.src = url;
     });
+}
+
+// Resolves { model, startS, reason, trimOnly: { model, startS, reason } }: the
+// first three are the leading-empty-edit list, trimOnly is the trimming edit
+// alone. Never rejects. One probe per page.
+export function probeEmptyEdit() {
+    if (cached) return cached;
+    cached = Promise.all([probeOnce(INIT_B64, MEDIA_B64, classify), probeOnce(INIT_TRIM_B64, MEDIA_LATE_B64, classifyTrim)])
+        .then(function (r) { r[0].trimOnly = r[1]; return r[0]; });
     return cached;
 }

@@ -56,7 +56,7 @@
 
 "use strict";
 
-import { probeEmptyEdit, MODELS as EDIT_MODELS } from './EmptyEditProbe.js';
+import { probeEmptyEdit, MODELS as EDIT_MODELS, TRIM_MODELS } from './EmptyEditProbe.js';
 
 const HORIZON_S = 12;        // decode + schedule this far ahead of the playhead
 const RING_BACK_S = 30;      // encoded ring span behind the playhead
@@ -328,7 +328,16 @@ export default class SegmentAudioFeed {
         if (!this.elstEdit) return;
         const e = this.elstEdit.emptyS, m = this.elstEdit.trimS;
         const model = EDIT_MODELS[this.engineEdit] || EDIT_MODELS['none'];
-        const shift = (e - m) - model.applied(e, m);
+        // A list that opens with an empty edit is the shape the probe measures
+        // first. A list that is a trimming edit alone is measured on its own:
+        // an engine that skips the first shape whole can still apply this one
+        // (Chrome 157, Safari 27.2), and taking the trim off the audio again
+        // then leaves it late by the whole trim. Unmeasured, it falls back to
+        // the first model, as before.
+        const tm = e === 0 && this.engineEditProbe && this.engineEditProbe.trimOnly
+            && TRIM_MODELS[this.engineEditProbe.trimOnly.model];
+        const applied = tm ? tm.applied(m) : model.applied(e, m);
+        const shift = (e - m) - applied;
         if (Math.abs(shift - this.presentationShiftS) > 0.001) {
             this.presentationShiftS = shift;
             if (this.anchor !== null) this._hardResync('elst-shift');
